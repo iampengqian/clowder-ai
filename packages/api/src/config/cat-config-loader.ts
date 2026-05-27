@@ -95,7 +95,7 @@ const roleTemplateSchema = z.object({
   name: z.string(),
   nickname: z.string().optional(),
   avatar: z.string().optional(),
-  color: colorSchema.optional(),
+  color: colorSchema, // required — TemplateStep UI dereferences color.primary/secondary
   roleDescription: z.string().optional(),
   personality: z.string().optional(),
   teamStrengths: z.string().optional(),
