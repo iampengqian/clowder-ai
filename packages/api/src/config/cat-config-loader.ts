@@ -78,13 +78,15 @@ const timeZoneSchema = z
   .min(1)
   .refine(isValidTimeZone, { message: 'timeZone must be a valid IANA timezone' });
 
-/** #768 P3: per-client runtime defaults entry */
+/** #768 P3: per-client runtime defaults entry.
+ *  cli/contextBudget/mcpSupport are optional for backward compat —
+ *  legacy catalogs may carry product-name entries with only defaultModel+models. */
 const clientDefaultsEntrySchema = z.object({
   defaultModel: z.string(),
   models: z.array(z.string()),
-  cli: cliConfigSchema,
-  contextBudget: contextBudgetSchema,
-  mcpSupport: z.boolean(),
+  cli: cliConfigSchema.optional(),
+  contextBudget: contextBudgetSchema.optional(),
+  mcpSupport: z.boolean().optional(),
 });
 
 /** #768 P2: role template — persona layer for member creation */

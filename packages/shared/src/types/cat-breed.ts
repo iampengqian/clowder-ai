@@ -272,9 +272,10 @@ export interface CoCreatorConfig {
 export interface ClientDefaultsEntry {
   readonly defaultModel: string;
   readonly models: readonly string[];
-  readonly cli: CliConfig;
-  readonly contextBudget: ContextBudget;
-  readonly mcpSupport: boolean;
+  /** Optional — legacy catalog entries may omit cli/contextBudget/mcpSupport. */
+  readonly cli?: CliConfig;
+  readonly contextBudget?: ContextBudget;
+  readonly mcpSupport?: boolean;
 }
 
 /**

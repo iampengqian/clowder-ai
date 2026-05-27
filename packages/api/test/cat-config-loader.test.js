@@ -1752,6 +1752,68 @@ describe('#768: client defaults and role template backfill', () => {
     }
   });
 
+  it('loadCatConfig accepts legacy partial clientDefaults entries (backward compat)', () => {
+    // Cloud review P1: old catalogs may have product-name keys with only defaultModel+models.
+    // Schema must not reject them.
+    const projectDir = mkdtempSync(join(tmpdir(), 'cat-768-legacy-'));
+    const templatePath = join(projectDir, 'cat-template.json');
+    writeFileSync(
+      templatePath,
+      JSON.stringify({
+        version: 2,
+        breeds: [],
+        roster: {},
+        reviewPolicy: {
+          requireDifferentFamily: true,
+          preferActiveInThread: true,
+          preferLead: true,
+          excludeUnavailable: true,
+        },
+        clientDefaults: {
+          anthropic: {
+            defaultModel: 'claude-sonnet-4-6',
+            models: ['claude-sonnet-4-6'],
+            cli: { command: 'claude', outputFormat: 'stream-json' },
+            contextBudget: {
+              maxPromptTokens: 180000,
+              maxContextTokens: 160000,
+              maxMessages: 200,
+              maxContentLengthPerMsg: 100000,
+            },
+            mcpSupport: true,
+          },
+          claude: {
+            defaultModel: 'claude-sonnet-4-6',
+            models: ['claude-sonnet-4-6'],
+          },
+          codex: {
+            defaultModel: 'gpt-5.4',
+            models: ['gpt-5.3-codex'],
+          },
+        },
+      }),
+    );
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const config = loadCatConfig();
+      assert.ok(config.clientDefaults, 'clientDefaults should be present');
+      // Full entry should work
+      assert.equal(config.clientDefaults.anthropic.mcpSupport, true);
+      // Legacy partial entries should parse without error
+      assert.equal(config.clientDefaults.claude.defaultModel, 'claude-sonnet-4-6');
+      assert.equal(config.clientDefaults.codex.defaultModel, 'gpt-5.4');
+      // Legacy entries won't have cli/contextBudget/mcpSupport — that's OK
+      assert.equal(config.clientDefaults.claude.cli, undefined);
+      assert.equal(config.clientDefaults.claude.mcpSupport, undefined);
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+
   it('clientDefaults keyed by ClientId (not product name)', () => {
     const { templatePath } = setupTemplateWithDefaults();
     const saved = process.env.CAT_TEMPLATE_PATH;
