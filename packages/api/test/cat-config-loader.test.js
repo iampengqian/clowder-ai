@@ -1856,7 +1856,12 @@ describe('#768: client defaults and role template backfill', () => {
         },
         roleTemplates: [
           { id: 'ragdoll', name: '布偶猫', color: { primary: '#6366f1', secondary: '#e0e7ff' } },
-          { id: 'maine-coon', name: '缅因猫', color: { primary: '#f97316', secondary: '#fff7ed' }, defaultClient: 'openai' },
+          {
+            id: 'maine-coon',
+            name: '缅因猫',
+            color: { primary: '#f97316', secondary: '#fff7ed' },
+            defaultClient: 'openai',
+          },
         ],
       }),
     );
