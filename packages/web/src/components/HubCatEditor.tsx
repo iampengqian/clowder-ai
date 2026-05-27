@@ -338,7 +338,7 @@ export function HubCatEditor({ cat, draft, existingCats, hasDossier, open, onClo
       name,
       displayName: name,
       nickname: t.nickname ?? '',
-      ...(templateClient ? { clientId: templateClient } : {}),
+      ...(templateClient ? { clientId: templateClient, defaultModel: '' } : {}),
       avatar: t.avatar ?? '',
       colorPrimary: t.color.primary,
       colorSecondary: t.color.secondary,

@@ -291,8 +291,9 @@ export interface RoleTemplate {
   readonly roleDescription?: string;
   readonly personality?: string;
   readonly teamStrengths?: string;
-  /** #768 P2: Which client this role template binds to by default. */
-  readonly defaultClient: ClientId;
+  /** #768 P2: Which client this role template binds to by default.
+   *  Optional for backward compat — legacy catalogs may lack this field. */
+  readonly defaultClient?: ClientId;
 }
 
 /**

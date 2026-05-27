@@ -1834,4 +1834,47 @@ describe('#768: client defaults and role template backfill', () => {
       _resetCachedConfig();
     }
   });
+
+  it('loadCatConfig accepts roleTemplates without defaultClient (backward compat)', () => {
+    // Cloud review P2: legacy catalogs may have roleTemplates without the
+    // defaultClient field (added in #768). Schema must not reject them.
+    const projectDir = mkdtempSync(join(tmpdir(), 'cat-768-legacy-rt-'));
+    const templatePath = join(projectDir, 'cat-template.json');
+    writeFileSync(
+      templatePath,
+      JSON.stringify({
+        version: 2,
+        breeds: [],
+        roster: {},
+        reviewPolicy: {
+          requireDifferentFamily: true,
+          preferActiveInThread: true,
+          preferLead: true,
+          excludeUnavailable: true,
+        },
+        roleTemplates: [
+          { id: 'ragdoll', name: '布偶猫' },
+          { id: 'maine-coon', name: '缅因猫', defaultClient: 'openai' },
+        ],
+      }),
+    );
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const config = loadCatConfig();
+      assert.ok(config.roleTemplates, 'roleTemplates should be present');
+      assert.equal(config.roleTemplates.length, 2);
+      // Entry without defaultClient should parse — field is undefined
+      const ragdoll = config.roleTemplates.find((t) => t.id === 'ragdoll');
+      assert.equal(ragdoll.defaultClient, undefined, 'legacy entry without defaultClient');
+      // Entry with defaultClient should still work
+      const maineCoon = config.roleTemplates.find((t) => t.id === 'maine-coon');
+      assert.equal(maineCoon.defaultClient, 'openai');
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
 });

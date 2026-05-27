@@ -99,7 +99,7 @@ const roleTemplateSchema = z.object({
   roleDescription: z.string().optional(),
   personality: z.string().optional(),
   teamStrengths: z.string().optional(),
-  defaultClient: z.string(),
+  defaultClient: z.string().optional(),
 });
 
 const catVariantSchema = z.object({
