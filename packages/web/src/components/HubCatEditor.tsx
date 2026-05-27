@@ -15,6 +15,8 @@ import {
   buildCodexConfigPatches,
   buildStrategyPayload,
   builtinAccountIdForClient,
+  CLIENT_OPTIONS,
+  type ClientId,
   type CodexRuntimeSettings,
   DEFAULT_ANTIGRAVITY_COMMAND_ARGS,
   filterAccounts,
@@ -327,10 +329,16 @@ export function HubCatEditor({ cat, draft, existingCats, hasDossier, open, onClo
       }
       return normalized; // fallback — backend will catch it
     });
+    // #768 P2: auto-select client from template's defaultClient binding
+    const validClientIds = new Set(CLIENT_OPTIONS.map((o) => o.value));
+    const templateClient =
+      t.defaultClient && validClientIds.has(t.defaultClient as ClientId) ? (t.defaultClient as ClientId) : undefined;
+
     patchForm({
       name,
       displayName: name,
       nickname: t.nickname ?? '',
+      ...(templateClient ? { clientId: templateClient } : {}),
       avatar: t.avatar ?? '',
       colorPrimary: t.color.primary,
       colorSecondary: t.color.secondary,

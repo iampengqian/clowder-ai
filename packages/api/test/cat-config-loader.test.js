@@ -1723,6 +1723,35 @@ describe('#768: client defaults and role template backfill', () => {
     }
   });
 
+  it('non-effort clients must not have cli.effort in clientDefaults', () => {
+    // P1 regression: google/kimi/opencode had effort:"max" which causes
+    // buildResolvedCliConfig() to throw "client X does not support cli.effort"
+    const realTemplatePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'cat-template.json');
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = realTemplatePath;
+    _resetCachedConfig();
+    try {
+      const config = loadCatConfig();
+      const effortProviders = new Set(['anthropic', 'openai']);
+      for (const [clientId, entry] of Object.entries(config.clientDefaults ?? {})) {
+        if (!effortProviders.has(clientId)) {
+          assert.equal(
+            entry.cli.effort,
+            undefined,
+            `clientDefaults["${clientId}"].cli.effort must be undefined — only anthropic/openai support effort`,
+          );
+        }
+      }
+      // Effort providers should have effort set
+      assert.ok(config.clientDefaults.anthropic?.cli?.effort, 'anthropic should have effort');
+      assert.ok(config.clientDefaults.openai?.cli?.effort, 'openai should have effort');
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+
   it('clientDefaults keyed by ClientId (not product name)', () => {
     const { templatePath } = setupTemplateWithDefaults();
     const saved = process.env.CAT_TEMPLATE_PATH;
