@@ -265,6 +265,36 @@ export interface CoCreatorConfig {
 }
 
 /**
+ * #768 P3: Per-client runtime defaults.
+ * Keys are ClientId values (e.g. "anthropic", "openai").
+ * Consumed by defaultCliForClient() and POST /api/cats backfill.
+ */
+export interface ClientDefaultsEntry {
+  readonly defaultModel: string;
+  readonly models: readonly string[];
+  readonly cli: CliConfig;
+  readonly contextBudget: ContextBudget;
+  readonly mcpSupport: boolean;
+}
+
+/**
+ * #768 P2: Role template — persona/soul layer for member creation.
+ * defaultClient links the template to a clientDefaults entry.
+ */
+export interface RoleTemplate {
+  readonly id: string;
+  readonly name: string;
+  readonly nickname?: string;
+  readonly avatar?: string;
+  readonly color?: CatColor;
+  readonly roleDescription?: string;
+  readonly personality?: string;
+  readonly teamStrengths?: string;
+  /** #768 P2: Which client this role template binds to by default. */
+  readonly defaultClient: ClientId;
+}
+
+/**
  * Root config v2: breeds + roster + reviewPolicy (F032)
  */
 export interface CatCafeConfigV2 {
@@ -273,6 +303,10 @@ export interface CatCafeConfigV2 {
   readonly roster: Roster;
   readonly reviewPolicy: ReviewPolicy;
   readonly coCreator?: CoCreatorConfig;
+  /** #768 P2: Role templates for member creation UI (persona/soul layer). */
+  readonly roleTemplates?: readonly RoleTemplate[];
+  /** #768 P3: Per-client runtime defaults keyed by ClientId. */
+  readonly clientDefaults?: Readonly<Record<string, ClientDefaultsEntry>>;
   /**
    * @deprecated clowder-ai#340: Accounts moved to global ~/.cat-cafe/accounts.json.
    * This field is only read during one-time migration (catalog → global).

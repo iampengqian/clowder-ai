@@ -1728,9 +1728,10 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
       {
         command: 'codex',
         outputFormat: 'json',
-        effort: 'xhigh', // Reset to openai's default
+        defaultArgs: ['exec', '--json'],
+        effort: 'xhigh', // Reset to openai's full defaults from clientDefaults
       },
-      'CLI should be reset to openai defaults including effort',
+      'CLI should be reset to openai defaults including effort and defaultArgs',
     );
   });
 

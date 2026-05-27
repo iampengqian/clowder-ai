@@ -10,10 +10,12 @@ import { fileURLToPath } from 'node:url';
 import type {
   CatBreed,
   CatCafeConfig,
+  CatCafeConfigV2,
   CatConfig,
   CatFeatures,
   CatId,
   CatVariant,
+  ClientDefaultsEntry,
   CoCreatorConfig,
   ContextBudget,
   MissionHubSelfClaimScope,
@@ -75,6 +77,28 @@ const timeZoneSchema = z
   .trim()
   .min(1)
   .refine(isValidTimeZone, { message: 'timeZone must be a valid IANA timezone' });
+
+/** #768 P3: per-client runtime defaults entry */
+const clientDefaultsEntrySchema = z.object({
+  defaultModel: z.string(),
+  models: z.array(z.string()),
+  cli: cliConfigSchema,
+  contextBudget: contextBudgetSchema,
+  mcpSupport: z.boolean(),
+});
+
+/** #768 P2: role template — persona layer for member creation */
+const roleTemplateSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  nickname: z.string().optional(),
+  avatar: z.string().optional(),
+  color: colorSchema.optional(),
+  roleDescription: z.string().optional(),
+  personality: z.string().optional(),
+  teamStrengths: z.string().optional(),
+  defaultClient: z.string(),
+});
 
 const catVariantSchema = z.object({
   id: z.string().min(1),
@@ -233,6 +257,10 @@ const catCafeConfigSchemaV2 = z
     coCreator: coCreatorConfigSchema.optional(),
     /** @deprecated Accepted for backward compat; migrated to coCreator at parse time. */
     owner: coCreatorConfigSchema.optional(),
+    /** #768 P2: role templates for member creation */
+    roleTemplates: z.array(roleTemplateSchema).optional(),
+    /** #768 P3: per-client runtime defaults keyed by ClientId */
+    clientDefaults: z.record(z.string(), clientDefaultsEntrySchema).optional(),
   })
   .transform((data) => {
     // Migrate legacy "owner" key → "coCreator" (coCreator takes precedence)
@@ -922,6 +950,21 @@ export function getAcpConfig(catId: string, projectRoot?: string): AcpVariantCon
     // Config unreadable → no ACP config
   }
   return undefined;
+}
+
+/**
+ * #768 P3: Look up per-client runtime defaults from cat-template.json.
+ * Returns cli, contextBudget, models, mcpSupport for the given clientId,
+ * or undefined when the client has no entry or config is unloadable.
+ */
+export function getClientDefaults(clientId: ClientId): ClientDefaultsEntry | undefined {
+  try {
+    const config = loadCatConfig() as CatCafeConfigV2;
+    return config.clientDefaults?.[clientId];
+  } catch {
+    // Config unreadable (stale path, missing file) — fall back to undefined
+    return undefined;
+  }
 }
 
 /** Reset cached config (for testing) */

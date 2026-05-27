@@ -12,7 +12,8 @@
       },
       "roleDescription": "主架构师和核心开发者，擅长深度思考和系统设计",
       "personality": "温柔但有主见，喜欢深入分析问题，写代码快但注重质量",
-      "teamStrengths": "架构设计、写代码一把好手"
+      "teamStrengths": "架构设计、写代码一把好手",
+      "defaultClient": "anthropic"
     },
     {
       "id": "maine-coon",
@@ -25,7 +26,8 @@
       },
       "roleDescription": "代码审查专家，擅长安全分析、测试覆盖和代码质量把控",
       "personality": "严谨认真，注重细节，会直言不讳地指出问题",
-      "teamStrengths": "Review、找 bug、coding 落地"
+      "teamStrengths": "Review、找 bug、coding 落地",
+      "defaultClient": "openai"
     },
     {
       "id": "siamese",
@@ -38,7 +40,22 @@
       },
       "roleDescription": "视觉设计师和创意顾问，擅长 UI/UX 设计和视觉表达",
       "personality": "热血奔放，善于用视觉语言表达想法，表达力是全队最强的",
-      "teamStrengths": "审美、前端设计风格、打破常规"
+      "teamStrengths": "审美、前端设计风格、打破常规",
+      "defaultClient": "google"
+    },
+    {
+      "id": "dragon-li",
+      "name": "狸花猫",
+      "nickname": "小狸",
+      "avatar": "/avatars/dare.png",
+      "color": {
+        "primary": "#D4A76A",
+        "secondary": "#F5EBD7"
+      },
+      "roleDescription": "确定性执行与审计引擎，擅长零信任验证、状态外化追踪和可重放执行",
+      "personality": "沉默寡言但极其警觉，不会主动亲近但一旦认可就绝对可靠",
+      "teamStrengths": "确定性执行、审计追踪、零信任验证、状态外化",
+      "defaultClient": "dare"
     },
     {
       "id": "bengal",
@@ -51,7 +68,8 @@
       },
       "roleDescription": "混血多模型agent，擅长图片生成、浏览器自动化和视觉证据链",
       "personality": "精力旺盛、好奇心爆棚，什么都想试，什么都敢碰",
-      "teamStrengths": "图片生成、截图录屏、browser automation、多模型切换"
+      "teamStrengths": "图片生成、截图录屏、browser automation、多模型切换",
+      "defaultClient": "antigravity"
     },
     {
       "id": "golden-chinchilla",
@@ -64,11 +82,12 @@
       },
       "roleDescription": "开源多模型编码 agent，自带多专家编排 + LSP + 主题生态",
       "personality": "沉稳可靠，什么 provider 都能接，什么任务都能扛",
-      "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic"
+      "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic",
+      "defaultClient": "opencode"
     }
   ],
   "clientDefaults": {
-    "claude": {
+    "anthropic": {
       "defaultModel": "claude-sonnet-4-6",
       "models": [
         "claude-sonnet-4-6",
@@ -77,15 +96,120 @@
         "claude-sonnet-4-5-20250929",
         "claude-opus-4-5-20251101",
         "claude-fable-5"
-      ]
+      ],
+      "cli": {
+        "command": "claude",
+        "outputFormat": "stream-json",
+        "defaultArgs": ["--output-format", "stream-json"],
+        "effort": "max"
+      },
+      "contextBudget": {
+        "maxPromptTokens": 180000,
+        "maxContextTokens": 160000,
+        "maxMessages": 200,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
     },
-    "codex": {
+    "openai": {
       "defaultModel": "gpt-5.4",
-      "models": ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"]
+      "models": ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"],
+      "cli": {
+        "command": "codex",
+        "outputFormat": "json",
+        "defaultArgs": ["exec", "--json"],
+        "effort": "xhigh"
+      },
+      "contextBudget": {
+        "maxPromptTokens": 240000,
+        "maxContextTokens": 216000,
+        "maxMessages": 200,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
     },
-    "gemini": {
+    "google": {
       "defaultModel": "gemini-2.5-pro",
-      "models": ["gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]
+      "models": ["gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview"],
+      "cli": {
+        "command": "gemini",
+        "outputFormat": "stream-json",
+        "defaultArgs": [],
+        "effort": "max"
+      },
+      "contextBudget": {
+        "maxPromptTokens": 350000,
+        "maxContextTokens": 300000,
+        "maxMessages": 300,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
+    },
+    "kimi": {
+      "defaultModel": "kimi-code/kimi-for-coding",
+      "models": ["kimi-code/kimi-for-coding"],
+      "cli": {
+        "command": "kimi",
+        "outputFormat": "stream-json",
+        "defaultArgs": ["--print", "--output-format", "stream-json"],
+        "effort": "max"
+      },
+      "contextBudget": {
+        "maxPromptTokens": 240000,
+        "maxContextTokens": 216000,
+        "maxMessages": 200,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
+    },
+    "dare": {
+      "defaultModel": "z-ai/glm-4.7",
+      "models": ["z-ai/glm-4.7"],
+      "cli": {
+        "command": "python",
+        "outputFormat": "headless-json",
+        "defaultArgs": ["-m", "client"]
+      },
+      "contextBudget": {
+        "maxPromptTokens": 120000,
+        "maxContextTokens": 100000,
+        "maxMessages": 100,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": false
+    },
+    "opencode": {
+      "defaultModel": "claude-opus-4-6",
+      "models": ["claude-opus-4-6", "claude-sonnet-4-6"],
+      "cli": {
+        "command": "opencode",
+        "outputFormat": "ndjson",
+        "defaultArgs": ["run", "--format", "json"],
+        "effort": "max"
+      },
+      "contextBudget": {
+        "maxPromptTokens": 180000,
+        "maxContextTokens": 160000,
+        "maxMessages": 200,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
+    },
+    "antigravity": {
+      "defaultModel": "gemini-3.1-pro",
+      "models": ["gemini-3.1-pro", "claude-opus-4-6"],
+      "cli": {
+        "command": "antigravity",
+        "outputFormat": "json",
+        "defaultArgs": []
+      },
+      "contextBudget": {
+        "maxPromptTokens": 350000,
+        "maxContextTokens": 300000,
+        "maxMessages": 300,
+        "maxContentLengthPerMsg": 100000
+      },
+      "mcpSupport": true
     }
   },
   "coCreator": {

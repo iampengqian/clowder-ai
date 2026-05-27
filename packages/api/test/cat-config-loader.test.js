@@ -19,6 +19,7 @@ const {
   getCatEffort,
   getAcpConfig,
   getCatFamily,
+  getClientDefaults,
   _resetCachedConfig,
 } = await import('../dist/config/cat-config-loader.js');
 
@@ -1587,6 +1588,155 @@ describe('#772: template breeds must not leak into runtime', () => {
     try {
       const acp = getAcpConfig('gemini');
       assert.equal(acp, undefined, 'template-only breed ACP must not leak into runtime');
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+});
+
+describe('#768: client defaults and role template backfill', () => {
+  /** Build a minimal template with clientDefaults and roleTemplates */
+  function setupTemplateWithDefaults() {
+    const projectDir = mkdtempSync(join(tmpdir(), 'cat-768-'));
+    const templatePath = join(projectDir, 'cat-template.json');
+    writeFileSync(
+      templatePath,
+      JSON.stringify({
+        version: 2,
+        breeds: [],
+        roster: {},
+        reviewPolicy: {
+          requireDifferentFamily: true,
+          preferActiveInThread: true,
+          preferLead: true,
+          excludeUnavailable: true,
+        },
+        roleTemplates: [
+          {
+            id: 'ragdoll',
+            name: '布偶猫',
+            defaultClient: 'anthropic',
+          },
+          {
+            id: 'maine-coon',
+            name: '缅因猫',
+            defaultClient: 'openai',
+          },
+        ],
+        clientDefaults: {
+          anthropic: {
+            defaultModel: 'claude-sonnet-4-6',
+            models: ['claude-sonnet-4-6', 'claude-opus-4-6'],
+            cli: {
+              command: 'claude',
+              outputFormat: 'stream-json',
+              defaultArgs: ['--output-format', 'stream-json'],
+              effort: 'max',
+            },
+            contextBudget: {
+              maxPromptTokens: 180000,
+              maxContextTokens: 160000,
+              maxMessages: 200,
+              maxContentLengthPerMsg: 100000,
+            },
+            mcpSupport: true,
+          },
+          openai: {
+            defaultModel: 'gpt-5.4',
+            models: ['gpt-5.3-codex', 'gpt-5.4'],
+            cli: {
+              command: 'codex',
+              outputFormat: 'json',
+              defaultArgs: ['exec', '--json'],
+              effort: 'xhigh',
+            },
+            contextBudget: {
+              maxPromptTokens: 240000,
+              maxContextTokens: 216000,
+              maxMessages: 200,
+              maxContentLengthPerMsg: 100000,
+            },
+            mcpSupport: true,
+          },
+        },
+      }),
+    );
+    return { projectDir, templatePath };
+  }
+
+  it('getClientDefaults returns full cli+contextBudget for known client', () => {
+    const { templatePath } = setupTemplateWithDefaults();
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const entry = getClientDefaults('anthropic');
+      assert.ok(entry, 'anthropic should have clientDefaults entry');
+      assert.equal(entry.defaultModel, 'claude-sonnet-4-6');
+      assert.equal(entry.cli.command, 'claude');
+      assert.equal(entry.cli.outputFormat, 'stream-json');
+      assert.deepEqual(entry.cli.defaultArgs, ['--output-format', 'stream-json']);
+      assert.equal(entry.cli.effort, 'max');
+      assert.equal(entry.contextBudget.maxPromptTokens, 180000);
+      assert.equal(entry.mcpSupport, true);
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+
+  it('getClientDefaults returns undefined for unknown client', () => {
+    const { templatePath } = setupTemplateWithDefaults();
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const entry = getClientDefaults('a2a');
+      assert.equal(entry, undefined, 'unknown client should return undefined');
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+
+  it('roleTemplates include defaultClient field', () => {
+    const { templatePath } = setupTemplateWithDefaults();
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const config = loadCatConfig();
+      assert.ok(config.roleTemplates, 'roleTemplates should be present');
+      assert.equal(config.roleTemplates.length, 2);
+      const ragdoll = config.roleTemplates.find((t) => t.id === 'ragdoll');
+      assert.equal(ragdoll.defaultClient, 'anthropic');
+      const maineCoon = config.roleTemplates.find((t) => t.id === 'maine-coon');
+      assert.equal(maineCoon.defaultClient, 'openai');
+    } finally {
+      if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = saved;
+      _resetCachedConfig();
+    }
+  });
+
+  it('clientDefaults keyed by ClientId (not product name)', () => {
+    const { templatePath } = setupTemplateWithDefaults();
+    const saved = process.env.CAT_TEMPLATE_PATH;
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+    _resetCachedConfig();
+    try {
+      const config = loadCatConfig();
+      assert.ok(config.clientDefaults, 'clientDefaults should be present');
+      // Keys should be ClientId values
+      assert.ok(config.clientDefaults.anthropic, 'should use "anthropic" not "claude"');
+      assert.ok(config.clientDefaults.openai, 'should use "openai" not "codex"');
+      // Old product-name keys should not exist
+      assert.equal(config.clientDefaults.claude, undefined, '"claude" key should not exist');
+      assert.equal(config.clientDefaults.codex, undefined, '"codex" key should not exist');
     } finally {
       if (saved === undefined) delete process.env.CAT_TEMPLATE_PATH;
       else process.env.CAT_TEMPLATE_PATH = saved;
