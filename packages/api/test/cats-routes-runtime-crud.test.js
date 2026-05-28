@@ -1735,6 +1735,51 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     );
   });
 
+  it('PATCH /api/cats/:id honors template effort over hardcoded default on client switch', async () => {
+    const projectRoot = createProjectRootFromRepoTemplate();
+    const templatePath = join(projectRoot, 'cat-template.json');
+
+    // Override the template: set openai effort to 'high' (differs from hardcoded 'xhigh')
+    const template = JSON.parse(readFileSync(templatePath, 'utf-8'));
+    if (template.clientDefaults?.openai?.cli) {
+      template.clientDefaults.openai.cli.effort = 'high';
+    }
+    writeFileSync(templatePath, JSON.stringify(template, null, 2));
+    seedCatalogFromTemplate(projectRoot, templatePath);
+    process.env.CAT_TEMPLATE_PATH = templatePath;
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    // Switch opus (anthropic) to openai
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: '/api/cats/opus',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        clientId: 'openai',
+        defaultModel: 'gpt-5.4',
+      }),
+    });
+
+    assert.equal(patchRes.statusCode, 200);
+    const runtimeCatalog = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'cat-catalog.json'), 'utf-8'));
+    const opusBreed = runtimeCatalog.breeds.find((breed) => breed.catId === 'opus');
+    const opusVariant = opusBreed.variants.find((variant) => variant.id === opusBreed.defaultVariantId);
+    assert.equal(
+      opusVariant.cli.effort,
+      'high',
+      'PATCH client switch should use template effort (high), not hardcoded default (xhigh)',
+    );
+
+    await app.close();
+  });
+
   it('PATCH /api/cats/:id allows non-provider edits for unbound opencode seed member', async () => {
     const projectRoot = createProjectRootFromRepoTemplate();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');

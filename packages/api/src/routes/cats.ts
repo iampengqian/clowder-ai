@@ -337,7 +337,9 @@ function resolveNextCli(params: {
   const { body, currentCat, effectiveClient, hasCommandArgsPatch, nextCommandArgs } = params;
   const isClientSwitch = body.clientId !== undefined && body.clientId !== currentCat.clientId;
   const defaultCli = defaultCliForClient(effectiveClient);
-  const defaultEffort = getDefaultCliEffortForProvider(effectiveClient);
+  // Prefer template-driven effort; fall back to hardcoded for templates without effort.
+  // This keeps PATCH (client switch) consistent with POST (which uses defaultCliForClient directly).
+  const defaultEffort = defaultCli.effort ?? getDefaultCliEffortForProvider(effectiveClient);
 
   if (body.cli !== undefined) {
     const baseCli =
