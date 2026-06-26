@@ -804,7 +804,7 @@ export async function* routeSerial(
             mcpAvailable,
             packBlocks,
           });
-          const traceMeta = { turnId: traceTurnId, sessionId: '', threadId, catId: catId as string };
+          const traceMeta = { turnId: traceTurnId, threadId, catId: catId as string };
           const summary = buildTraceSummary(trace, traceMeta);
           const detail = buildTraceDetail(trace, traceMeta);
           traceStore.persist(summary, detail).catch((err) => {
