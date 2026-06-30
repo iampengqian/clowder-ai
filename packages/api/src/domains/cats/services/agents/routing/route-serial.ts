@@ -478,6 +478,7 @@ export async function* routeSerial(
     queueHasQueuedMessages,
     hasQueuedOrActiveAgentForCat,
     deferA2AEnqueue,
+    freshnessReinvokeEnqueue,
   } = options;
   const previousResponses: { catId: CatId; content: string }[] = [];
   const thinkingMode = options.thinkingMode ?? 'play';
@@ -907,6 +908,19 @@ export async function* routeSerial(
           },
         );
         deliveryBoundaryId = inc.boundaryId;
+
+        // F254 Phase A (AC-A3 seed): Initialize seenCursor from delivery boundary
+        // so the freshness gate knows "messages delivered at invoke-start = already seen".
+        // This is the seed — mid-turn reads via MCP tools push it further forward.
+        // Fail-open: if seed fails, the freshness gate fails open (no cursor = forward).
+        if (deliveryBoundaryId && deps.deliveryCursorStore) {
+          try {
+            await deps.deliveryCursorStore.ackSeenCursor(userId, catId, threadId, deliveryBoundaryId);
+          } catch (err) {
+            log.warn({ catId: catId as string, err }, '[F254] seenCursor seed failed');
+          }
+        }
+
         if (inc.degradation) {
           yield {
             type: 'system_info' as AgentMessageType,
@@ -1034,6 +1048,7 @@ export async function* routeSerial(
       const streamRichBlocks: import('@cat-cafe/shared').RichBlock[] = [];
       // F22 R2 P1-1: Capture own invocationId from stream (not getLatestId)
       let ownInvocationId: string | undefined;
+      let visibleContentInvocationIdOverride: string | undefined;
       // F111 Phase B: Streaming TTS chunker for real-time voice (voiceMode only)
       let voiceChunker: StreamingTtsChunker | undefined;
       let deferredVoiceInvocationId: string | undefined;
@@ -1230,6 +1245,12 @@ export async function* routeSerial(
         ...(staticIdentity ? { systemPrompt: staticIdentity } : {}),
         ...(options.parentInvocationId ? { parentInvocationId: options.parentInvocationId } : {}),
         continuityCapsule,
+        // F247 AC-B1c-3 PR-C: Plumb raw mention text + mentioning cat for cloud bridge dispatch.
+        // - mentionContent: the raw user/cat message (NOT the orchestrated prompt with system context)
+        // - mentioningCatId: A2A → the cat that @ mentioned; user-initiated → userId as fallback
+        //   so the cloud cat knows "who called" (gpt52 R1 P1-2 contract: calledBy ≠ thread owner)
+        mentionContent: message,
+        mentioningCatId: (directMessageFrom ?? userId) as import('@cat-cafe/shared').CatId,
         // F121: Pass A2A trigger message ID for auto-replyTo threading
         ...(worklistEntry.a2aTriggerMessageId.get(catId)
           ? { a2aTriggerMessageId: worklistEntry.a2aTriggerMessageId.get(catId) }
@@ -1683,6 +1704,7 @@ export async function* routeSerial(
         routingGuardAttempted = true;
         routingGuardRemediated = true;
         const originalTextStreamEventsBeforeRemedial = [...initialTextStreamEvents];
+        const originalVisibleInvocationIdBeforeRemedial = ownInvocationId;
         const originalDeferredVoiceInvocationIdBeforeRemedial = deferredVoiceInvocationId;
         const originalDeferredVoiceTextChunksBeforeRemedial = [...deferredVoiceTextChunks];
         initialTextStreamEvents.splice(0, initialTextStreamEvents.length);
@@ -1873,6 +1895,9 @@ export async function* routeSerial(
         // does not replace generated work with a bare route outlet.
         const preservesOriginalVisibleContent =
           (!remedialCleanText || remedialIsRouteOnly) && originalStoredContentBeforeRemedial.length > 0;
+        visibleContentInvocationIdOverride = preservesOriginalVisibleContent
+          ? originalVisibleInvocationIdBeforeRemedial
+          : undefined;
         const remedialStoredContent = preservesOriginalVisibleContent
           ? originalStoredContentBeforeRemedial
           : remedialCleanText;
@@ -1914,11 +1939,40 @@ export async function* routeSerial(
         }
         const remedialHasCoCreatorLineStartMention = hasRoutingExitCoCreatorLineStartMention(remedialRoutingContent);
         const remedialHasLocalCoCreatorLineStartMention = hasLocalCoCreatorLineStartMention(remedialRoutingContent);
-        const visibleRemedialStreamEvents = remedialIsRouteOnly
+        const isRemedialLifecycleBoundary = (event: AgentMessage): boolean => {
+          if (event.type !== 'system_info' || !event.content) return false;
+          try {
+            const parsed = JSON.parse(event.content);
+            return parsed.type === 'invocation_created';
+          } catch {
+            return false;
+          }
+        };
+        const visibleRemedialSourceStreamEvents = remedialIsRouteOnly
           ? remedialStreamEvents.filter((event) => event.type !== 'text')
           : remedialStreamEvents;
-        const originalVisibleStreamEventsForRemedialTurn = ownInvocationId
-          ? originalTextStreamEventsBeforeRemedial.map((event) => ({ ...event, invocationId: ownInvocationId }))
+        const visibleRemedialEvidenceStreamEvents: AgentMessage[] = [];
+        const remedialLifecycleStreamEvents: AgentMessage[] = [];
+        for (const event of visibleRemedialSourceStreamEvents) {
+          if (
+            preservesOriginalVisibleContent &&
+            originalVisibleInvocationIdBeforeRemedial &&
+            isRemedialLifecycleBoundary(event)
+          ) {
+            remedialLifecycleStreamEvents.push(event);
+            continue;
+          }
+          visibleRemedialEvidenceStreamEvents.push(
+            preservesOriginalVisibleContent && originalVisibleInvocationIdBeforeRemedial
+              ? { ...event, invocationId: originalVisibleInvocationIdBeforeRemedial }
+              : event,
+          );
+        }
+        const originalVisibleStreamEventsForRemedialTurn = originalVisibleInvocationIdBeforeRemedial
+          ? originalTextStreamEventsBeforeRemedial.map((event) => ({
+              ...event,
+              invocationId: event.invocationId ?? originalVisibleInvocationIdBeforeRemedial,
+            }))
           : originalTextStreamEventsBeforeRemedial;
 
         return {
@@ -1927,9 +1981,14 @@ export async function* routeSerial(
           a2aMentions: remedialA2aMentions,
           hasCoCreatorLineStartMention: remedialHasCoCreatorLineStartMention,
           hasLocalCoCreatorLineStartMention: remedialHasLocalCoCreatorLineStartMention,
-          // Exit-only remedials validate the original text instead of replacing it; surface it after validation.
+          // Exit-only remedials validate preserved content instead of replacing it; replay the visible
+          // text and routing-exit evidence before the remedial boundary can replace that turn.
           streamEvents: preservesOriginalVisibleContent
-            ? [...visibleRemedialStreamEvents, ...originalVisibleStreamEventsForRemedialTurn]
+            ? [
+                ...originalVisibleStreamEventsForRemedialTurn,
+                ...visibleRemedialEvidenceStreamEvents,
+                ...remedialLifecycleStreamEvents,
+              ]
             : remedialStreamEvents,
         };
       };
@@ -2427,7 +2486,8 @@ export async function* routeSerial(
         let triagePlanIdsToLink: string[] = [];
         try {
           // #573: persist with the OUTER cat-cafe parentInvocationId (set by QueueProcessor)
-          const persistedInvocationId = options.parentInvocationId ?? ownInvocationId;
+          const visibleTurnInvocationId = visibleContentInvocationIdOverride ?? ownInvocationId;
+          const persistedInvocationId = options.parentInvocationId ?? visibleTurnInvocationId;
           // F229 KD-17: Post-process concierge reply — inject CardBlock actions from HandleMap markers
           if (
             'conciergeConfig' in conciergeCtx &&
@@ -2508,7 +2568,7 @@ export async function* routeSerial(
                   ? {
                       stream: {
                         invocationId: persistedInvocationId,
-                        turnInvocationId: ownInvocationId ?? persistedInvocationId,
+                        turnInvocationId: visibleTurnInvocationId ?? persistedInvocationId,
                       },
                     }
                   : {}),
@@ -2575,7 +2635,7 @@ export async function* routeSerial(
                   ? {
                       stream: {
                         invocationId: persistedInvocationId,
-                        turnInvocationId: ownInvocationId ?? persistedInvocationId,
+                        turnInvocationId: visibleTurnInvocationId ?? persistedInvocationId,
                       },
                     }
                   : {}),
@@ -3482,6 +3542,74 @@ export async function* routeSerial(
           guideStore: createGuideStoreBridge(sessionStore),
           threadStore: deps.invocationDeps.threadStore!,
         });
+      }
+
+      // F254 B3/B4: Freshness re-invoke consumption — enqueue re-invoke if the
+      // invocation's terminal hook decided shouldReinvoke=true. Checked AFTER A2A
+      // detection (A2A has priority) and BEFORE done yield (enqueue happens while
+      // the route is still live). Fail-open: errors never block the done signal.
+      if (freshnessReinvokeEnqueue && doneMsg?.metadata && !hadError) {
+        const reinvokeDecision = (doneMsg.metadata as unknown as Record<string, unknown>).freshnessReinvoke as
+          | {
+              shouldReinvoke: boolean;
+              reason: string;
+              noticeIds: string[];
+              senders: string[];
+              skipReason?: string;
+              reinvokePrompt?: string;
+            }
+          | undefined;
+        if (reinvokeDecision?.shouldReinvoke) {
+          try {
+            // P1-2 fix: use the spec-defined prompt from the factory, NOT empty string.
+            // QueueProcessor strips freshnessContext, so content must carry the prompt.
+            const reinvokeContent =
+              reinvokeDecision.reinvokePrompt ||
+              `你上一轮 turn 中有来自 ${reinvokeDecision.senders.join(', ')} 的 ${reinvokeDecision.noticeIds.length} 条未读消息，请调 list_recent 查看并回应。`;
+            freshnessReinvokeEnqueue({
+              threadId,
+              userId,
+              content: reinvokeContent,
+              source: 'agent',
+              sourceCategory: 'freshness',
+              targetCats: [catId as string],
+              callerCatId: catId as string,
+              autoExecute: true,
+              priority: 'normal',
+              intent: 'execute',
+              freshnessContext: {
+                sourceNoticeIds: reinvokeDecision.noticeIds,
+                senders: reinvokeDecision.senders,
+                reason: reinvokeDecision.reason,
+              },
+            });
+            log.info(
+              {
+                catId: catId as string,
+                threadId,
+                invocationId: ownInvocationId,
+                reason: reinvokeDecision.reason,
+                noticeCount: reinvokeDecision.noticeIds.length,
+              },
+              '[F254-B3] freshness re-invoke enqueued from routing layer',
+            );
+          } catch (err) {
+            log.warn(
+              { catId: catId as string, threadId, err },
+              '[F254-B3] freshness re-invoke enqueue failed, fail-open',
+            );
+          }
+        } else if (reinvokeDecision && !reinvokeDecision.shouldReinvoke) {
+          log.debug(
+            {
+              catId: catId as string,
+              threadId,
+              invocationId: ownInvocationId,
+              skipReason: reinvokeDecision.skipReason ?? reinvokeDecision.reason,
+            },
+            '[F254-B4] freshness re-invoke skipped',
+          );
+        }
       }
 
       // Yield buffered done with correct isFinal (evaluated AFTER worklist may have grown)
