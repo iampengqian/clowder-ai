@@ -566,6 +566,8 @@ function evaluateHandleCheck(
   return { ruleId, status: 'pass' };
 }
 
+import { readLinkGraphSnapshot, evaluateLinkGraphConsensus, findBestProposal } from '../../../domains/cats/services/agents/providers/invaluable-link-graph-consensus.js';
+
 function evaluateInvaluableConsensus(
   ruleId: string,
   stageId: string,
@@ -575,6 +577,52 @@ function evaluateInvaluableConsensus(
   trace: SopTrace,
 ): SopEvalResult {
   const root = trace.gitState.worktreeRoot || process.cwd();
+
+  // Try real P2P Link Graph consensus first from .loop/ directory
+  const loopDir = join(root, '.loop');
+  if (existsSync(loopDir)) {
+    try {
+      const nodes = readdirSync(loopDir);
+      for (const nodeName of nodes) {
+        const nodeDataDir = join(loopDir, nodeName);
+        const snapshot = readLinkGraphSnapshot(nodeDataDir);
+        if (snapshot && snapshot.nodes.length > 0) {
+          const minScore = predicate.minScore ?? 80;
+          const bestProposal = findBestProposal(snapshot, minScore);
+          if (bestProposal) {
+            if (bestProposal.passed) {
+              return { ruleId, status: 'pass' };
+            }
+            if (bestProposal.score < minScore) {
+              return violation(
+                ruleId,
+                stageId,
+                kind,
+                severity,
+                'invaluable_consensus',
+                `Selected plan score is ${bestProposal.score.toFixed(2)}, which is below the required minimum score of ${minScore}`,
+                `invaluable:low_score:${bestProposal.score.toFixed(2)}`,
+              );
+            }
+            if (bestProposal.unresolvedObjections.length > 0 && !(predicate.allowUnresolvedRisks ?? false)) {
+              return violation(
+                ruleId,
+                stageId,
+                kind,
+                severity,
+                'invaluable_consensus',
+                `Selected plan has ${bestProposal.unresolvedObjections.length} unresolved objections`,
+                `invaluable:unresolved_risks:${bestProposal.unresolvedObjections.length}`,
+              );
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // Fallback on error
+    }
+  }
+
   const sessionsDir = join(root, '.invaluable-team', 'sessions');
 
   if (!existsSync(sessionsDir)) {
