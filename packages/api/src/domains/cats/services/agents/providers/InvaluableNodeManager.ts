@@ -131,7 +131,25 @@ export class InvaluableNodeManager {
       }
     );
 
+    let stderrLinesThisSecond = 0;
+    let windowStart = Date.now();
+
     child.stderr?.on('data', (data) => {
+      const currentTime = Date.now();
+      if (currentTime - windowStart > 1000) {
+        stderrLinesThisSecond = 0;
+        windowStart = currentTime;
+      }
+
+      if (stderrLinesThisSecond > 50) {
+        if (stderrLinesThisSecond === 51) {
+          log.warn(`[${name}] Log flood detected. Muffling stderr for this second.`);
+          stderrLinesThisSecond++;
+        }
+        return;
+      }
+
+      stderrLinesThisSecond++;
       log.debug(`[${name}] ${data.toString().trim()}`);
     });
 

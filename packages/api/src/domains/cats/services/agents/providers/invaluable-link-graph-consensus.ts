@@ -165,21 +165,32 @@ export function evaluateLinkGraphConsensus(
 }
 
 /**
- * Recursively collects all descendant node IDs from the graph edges.
+ * Iteratively collects all descendant node IDs using queue-based BFS.
+ * Safe from stack overflows (RangeError) regardless of graph size or depth.
  */
 function collectDescendants(
   snapshot: LinkGraphSnapshot,
-  parentId: string,
+  rootId: string,
   collected: Set<string>,
-  visited: Set<string> = new Set(),
 ): void {
-  if (visited.has(parentId)) return; // cycle guard
-  visited.add(parentId);
+  const queue: string[] = [rootId];
+  const visited = new Set<string>();
 
-  for (const edge of snapshot.edges) {
-    if (edge.source === parentId) {
-      collected.add(edge.target);
-      collectDescendants(snapshot, edge.target, collected, visited);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    if (current !== rootId) {
+      collected.add(current);
+    }
+
+    for (const edge of snapshot.edges) {
+      if (edge.source === current) {
+        if (!visited.has(edge.target)) {
+          queue.push(edge.target);
+        }
+      }
     }
   }
 }
