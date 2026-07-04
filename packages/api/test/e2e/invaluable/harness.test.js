@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import Fastify from 'fastify';
 import { InvaluableNodeManager } from '../../../dist/domains/cats/services/agents/providers/InvaluableNodeManager.js';
+import { evaluateLinkGraphConsensus } from '../../../dist/domains/cats/services/agents/providers/invaluable-link-graph-consensus.js';
 import {
   generateEd25519Keys,
   MermaidDashboardParser,
@@ -186,6 +187,36 @@ test.describe('E2E Test Harness Verification Suite', () => {
     assert.strictEqual(evalRes.score, 80);
     assert.strictEqual(evalRes.passed, true);
     assert.strictEqual(evalRes.unresolvedObjections.length, 0);
+  });
+
+  test('evaluateLinkGraphConsensus evaluates P2P Link Graph and checks topological resolving of objections', () => {
+    // 1. Setup a Link Graph mock snapshot containing a Proposal and an Objection
+    const snapshot = {
+      nodes: [
+        { id: 'prop-1', type: 'PROPOSAL', content: 'Design core gateway', author: 'leo', timestamp: Date.now() },
+        { id: 'obj-1', type: 'OBJECTION', content: 'May bottleneck performance', author: 'niko', quantity: 5, resolved: false, timestamp: Date.now() },
+        { id: 'back-1', type: 'BACKING', content: 'Counter backing objection', author: 'leo', quantity: 10, timestamp: Date.now() }
+      ],
+      edges: [
+        { source: 'prop-1', target: 'obj-1', relation: 'objection' },
+        { source: 'back-1', target: 'obj-1', relation: 'backing' } // Backing targets the objection node
+      ]
+    };
+
+    // 2. Evaluate before adding backing: objection is unresolved
+    const snapshotNoBacking = {
+      nodes: snapshot.nodes.filter(n => n.id !== 'back-1'),
+      edges: snapshot.edges.filter(e => e.source !== 'back-1')
+    };
+
+    const resBefore = evaluateLinkGraphConsensus(snapshotNoBacking, 'prop-1');
+    assert.strictEqual(resBefore.unresolvedObjections.length, 1);
+    assert.strictEqual(resBefore.passed, false);
+
+    // 3. Evaluate with positive backing: objection should be topologically resolved!
+    const resAfter = evaluateLinkGraphConsensus(snapshot, 'prop-1');
+    assert.strictEqual(resAfter.unresolvedObjections.length, 0);
+    assert.strictEqual(resAfter.passed, true); // Passed consensus since objection resolved
   });
 
   test('MermaidDashboardParser parses and renders Mermaid graph correctly', () => {

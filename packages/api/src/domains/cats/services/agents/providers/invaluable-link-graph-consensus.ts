@@ -142,11 +142,24 @@ export function evaluateLinkGraphConsensus(
     if (node.type === 'BACKING') {
       positiveWeight += qty;
     } else if (node.type === 'OBJECTION') {
-      if (!node.resolved) {
+      // Topological active check: Check if there's any positive backing targeting this objection
+      let isTopologicallyResolved = false;
+      const incomingEdges = snapshot.edges.filter(e => e.target === node.id);
+      
+      for (const edge of incomingEdges) {
+        const sourceNode = snapshot.nodes.find(n => n.id === edge.source);
+        if (sourceNode && sourceNode.type === 'BACKING' && (sourceNode.quantity ?? 0) > 0) {
+          isTopologicallyResolved = true;
+          break;
+        }
+      }
+
+      const resolved = node.resolved || isTopologicallyResolved;
+
+      if (!resolved) {
         negativeWeight += qty;
         unresolvedObjections.push(node);
       }
-      // Resolved objections don't count against consensus
     }
   }
 
@@ -189,6 +202,15 @@ function collectDescendants(
       if (edge.source === current) {
         if (!visited.has(edge.target)) {
           queue.push(edge.target);
+        }
+      }
+      // Collect incoming backing/objection commitments targeting this node
+      if (edge.target === current) {
+        if (!visited.has(edge.source)) {
+          const srcNode = snapshot.nodes.find(n => n.id === edge.source);
+          if (srcNode && (srcNode.type === 'BACKING' || srcNode.type === 'OBJECTION')) {
+            queue.push(edge.source);
+          }
         }
       }
     }
