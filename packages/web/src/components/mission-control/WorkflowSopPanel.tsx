@@ -95,9 +95,31 @@ function tryResolveWorkflowSopSkill(sop: WorkflowSop) {
 
 export function WorkflowSopPanel({ backlogItemId }: WorkflowSopPanelProps) {
   const [sop, setSop] = useState<ExtendedWorkflowSop | null>(null);
+  const [meshHealth, setMeshHealth] = useState<Array<{ name: string; status: 'active' | 'dead' | 'cooldown'; uptime: number; restarts: number }> | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const requestSeq = useRef(0);
+
+  useEffect(() => {
+    if (!backlogItemId) {
+      setMeshHealth(null);
+      return;
+    }
+    async function fetchHealth() {
+      try {
+        const res = await apiFetch('/api/invaluable/mesh-health');
+        if (res.ok) {
+          const data = await res.json() as typeof meshHealth;
+          setMeshHealth(data);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    void fetchHealth();
+    const interval = setInterval(fetchHealth, 5000);
+    return () => clearInterval(interval);
+  }, [backlogItemId]);
 
   const loadSop = useCallback(async (itemId: string) => {
     const seq = ++requestSeq.current;
@@ -268,6 +290,42 @@ export function WorkflowSopPanel({ backlogItemId }: WorkflowSopPanelProps) {
           </div>
         ))}
       </div>
+
+      {/* Invaluable P2P Node Health */}
+      {meshHealth && meshHealth.length > 0 && (
+        <div className="mb-3 space-y-2 rounded-xl bg-[var(--console-shell-bg,rgba(10,13,20,0.3))] px-3 py-2.5 shadow-sm" style={{ border: '1px solid rgba(255, 255, 255, 0.04)' }}>
+          <p className="text-micro font-semibold uppercase tracking-wide text-cafe-secondary">
+            Invaluable Mesh P2P 节点状态
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {meshHealth.map((node) => (
+              <div
+                key={node.name}
+                className="flex items-center gap-1.5 rounded-lg px-2 py-1 shadow-sm"
+                style={{
+                  backgroundColor: 'var(--console-card-bg)',
+                  border: '1px solid rgba(255, 255, 255, 0.03)',
+                }}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${node.status === 'active' ? 'animate-pulse' : ''}`}
+                  style={{
+                    backgroundColor:
+                      node.status === 'active'
+                        ? '#10b981'
+                        : node.status === 'cooldown'
+                        ? '#f59e0b'
+                        : '#ef4444',
+                  }}
+                />
+                <span className="text-[10px] font-semibold text-cafe-secondary uppercase">
+                  {node.name.replace('ict-', '')}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Invaluable P2P Consensus */}
       {sop.invaluableConsensus && (

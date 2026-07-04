@@ -11,6 +11,10 @@ export interface InvaluableNode {
   name: string;
   dataDir: string;
   process: ChildProcess | null;
+  startTime?: number;
+  lastRestartTime?: number;
+  restartCount?: number;
+  status?: 'active' | 'dead' | 'cooldown';
 }
 
 export class InvaluableNodeManager {
@@ -19,6 +23,7 @@ export class InvaluableNodeManager {
   private readonly monorepoRoot: string;
   private readonly invaluableRoot: string;
   private readonly buildJsPath: string;
+  private isShuttingDown = false;
 
   private constructor() {
     this.monorepoRoot = resolveStartupProjectRoot();
@@ -31,6 +36,9 @@ export class InvaluableNodeManager {
         name,
         dataDir: resolve(this.monorepoRoot, '.loop', name),
         process: null,
+        restartCount: 0,
+        lastRestartTime: 0,
+        status: 'dead',
       });
     }
   }
@@ -59,18 +67,15 @@ export class InvaluableNodeManager {
     log.info(`Provisioning new Ed25519 identity.key for node: ${name}`);
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519', {
       publicKeyEncoding: { type: 'spki', format: 'der' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+      privateKeyEncoding: { type: 'pkcs8', format: 'der' },
     });
 
     const publicKeyRaw = publicKey.subarray(12); // last 32 bytes of 44-byte SPKI
     const seed = privateKey.subarray(privateKey.length - 32); // last 32 bytes of PKCS#8
     const secretKey64 = Buffer.concat([seed, publicKeyRaw]); // 64 bytes
 
-    const publicSpki = publicKey.toString('base64url');
-    const privateSeed64 = secretKey64.toString('base64url');
-
-    const content = `type=ed25519\npublic=${publicSpki}\nprivate=${privateSeed64}\n`;
-    writeFileSync(keyPath, content, 'utf8');
+    const iniContent = `type=ed25519\npublic=${publicKey.toString('base64url')}\nprivate=${secretKey64.toString('base64url')}\n`;
+    writeFileSync(keyPath, iniContent, 'utf8');
   }
 
   /**
@@ -80,6 +85,17 @@ export class InvaluableNodeManager {
     const node = this.nodes.get(name);
     if (!node) throw new Error(`Unknown node: ${name}`);
     if (node.process && !node.process.killed) return;
+
+    // Rate-limiting restart logic to prevent hotloops on continuous crash
+    const now = Date.now();
+    const lastRestart = node.lastRestartTime || 0;
+    const currentCount = node.restartCount || 0;
+
+    if (now - lastRestart < 10000 && currentCount >= 3) {
+      log.error(`Node ${name} is crashing continuously. Entering restart cooldown...`);
+      node.status = 'cooldown';
+      return;
+    }
 
     this.provisionNode(name);
 
@@ -91,6 +107,11 @@ export class InvaluableNodeManager {
     }
 
     log.info(`Spawning background peer node process: ${name}`);
+    node.startTime = Date.now();
+    node.lastRestartTime = Date.now();
+    node.restartCount = (now - lastRestart < 10000) ? currentCount + 1 : 1;
+    node.status = 'active';
+
     const child = spawn(
       'node',
       [
@@ -118,6 +139,19 @@ export class InvaluableNodeManager {
       log.warn(`Background peer node ${name} exited with code ${code} (signal ${signal})`);
       if (node.process === child) {
         node.process = null;
+        node.status = 'dead';
+
+        // Auto-restart if we are not shutting down the whole mesh
+        if (!this.isShuttingDown) {
+          log.info(`Scheduling auto-restart for dead peer node: ${name}`);
+          setTimeout(() => {
+            try {
+              this.startNode(name);
+            } catch (err: any) {
+              log.error(`Auto-restart failed for node ${name}: ${err.message}`);
+            }
+          }, 2000);
+        }
       }
     });
 
@@ -128,14 +162,50 @@ export class InvaluableNodeManager {
    * Kills all background node processes on Clowder shutdown.
    */
   public stopAll(): void {
+    this.isShuttingDown = true;
     for (const name of this.nodes.keys()) {
       const node = this.nodes.get(name);
       if (node && node.process) {
         log.info(`Stopping background peer node process: ${name}`);
         node.process.kill('SIGTERM');
         node.process = null;
+        node.status = 'dead';
       }
     }
+  }
+
+  /**
+   * Returns diagnostic stats for all provisioned peer nodes.
+   */
+  public getMeshHealth(): Array<{
+    name: string;
+    status: 'active' | 'dead' | 'cooldown';
+    uptime: number;
+    restarts: number;
+  }> {
+    const health: Array<{
+      name: string;
+      status: 'active' | 'dead' | 'cooldown';
+      uptime: number;
+      restarts: number;
+    }> = [];
+
+    const now = Date.now();
+    for (const node of this.nodes.values()) {
+      let currentStatus: 'active' | 'dead' | 'cooldown' = node.status || 'dead';
+      if (node.process && !node.process.killed) {
+        currentStatus = 'active';
+      }
+
+      health.push({
+        name: node.name,
+        status: currentStatus,
+        uptime: currentStatus === 'active' && node.startTime ? now - node.startTime : 0,
+        restarts: node.restartCount || 0,
+      });
+    }
+
+    return health;
   }
 
   /**

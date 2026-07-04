@@ -38,6 +38,12 @@ export async function invaluableInferenceGateway(
 ): Promise<void> {
   const { resolveApiKey, defaultModel = 'claude-3-5-sonnet-20241022', maxBodySize = 1024 * 1024, timeoutMs = 120_000 } = opts;
 
+  // Diagnostic endpoint for frontend to check peer nodes mesh health
+  app.get('/api/invaluable/mesh-health', async (request, reply) => {
+    const { InvaluableNodeManager } = await import('../domains/cats/services/agents/providers/InvaluableNodeManager.js');
+    return InvaluableNodeManager.getInstance().getMeshHealth();
+  });
+
   // Primary endpoint for Invaluable AgentBrain requests
   app.post<{ Body: InferenceRequestBody }>('/api/invaluable/inference', {
     config: { rawBody: false },
