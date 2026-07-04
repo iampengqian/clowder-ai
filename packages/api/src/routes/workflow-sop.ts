@@ -57,7 +57,50 @@ export const workflowSopRoutes: FastifyPluginAsync<WorkflowSopRoutesOptions> = a
       reply.status(404);
       return { error: 'Workflow SOP not found' };
     }
-    return sop;
+
+    // Check if there is a real Invaluable P2P Loop directory in workspace root
+    const root = process.cwd();
+    const { existsSync, readdirSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const loopDir = join(root, '.loop');
+
+    let invaluableConsensus: any = null;
+
+    if (existsSync(loopDir)) {
+      try {
+        const {
+          readLinkGraphSnapshot,
+          findBestProposal,
+          renderMermaidGraph,
+        } = await import('../domains/cats/services/agents/providers/invaluable-link-graph-consensus.js');
+
+        const nodes = readdirSync(loopDir);
+        for (const nodeName of nodes) {
+          const nodeDataDir = join(loopDir, nodeName);
+          const snapshot = readLinkGraphSnapshot(nodeDataDir);
+          if (snapshot && snapshot.nodes.length > 0) {
+            const bestProposal = findBestProposal(snapshot);
+            const mermaid = renderMermaidGraph(snapshot);
+            if (bestProposal || mermaid) {
+              invaluableConsensus = {
+                score: bestProposal?.score ?? 0,
+                passed: bestProposal?.passed ?? false,
+                unresolvedObjectionsCount: bestProposal?.unresolvedObjections.length ?? 0,
+                mermaid,
+              };
+              break; // Use the first active node graph found
+            }
+          }
+        }
+      } catch (err) {
+        // ignore errors during runtime scan
+      }
+    }
+
+    return {
+      ...sop,
+      invaluableConsensus,
+    };
   });
 
   app.put<{ Params: { itemId: string } }>('/api/backlog/:itemId/workflow-sop', async (request, reply) => {
