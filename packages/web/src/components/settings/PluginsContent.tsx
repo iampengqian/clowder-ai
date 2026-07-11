@@ -1,11 +1,12 @@
 'use client';
 
-import type { PluginInfo, PluginStatus } from '@cat-cafe/shared';
+import type { PluginInfo } from '@cat-cafe/shared';
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
 import { HubIcon } from '../hub-icons';
 import { GitHubIcon } from '../icons/ConnectorIcons';
 import {
+  SettingsResourceToggleSwitch,
   settingsResourceActionGroupClass,
   settingsResourceAvatarClass,
   settingsResourceCardClass,
@@ -14,14 +15,6 @@ import {
 import { PluginConfigPanel } from './PluginConfigPanel';
 import { SettingsBadge } from './primitives/SettingsBadge';
 import { SettingsText } from './primitives/SettingsText';
-
-type BadgeTone = 'emerald' | 'amber' | 'slate' | 'red' | 'purple' | 'blue';
-const STATUS_CONFIG: Record<PluginStatus, { label: string; tone: BadgeTone }> = {
-  enabled: { label: '已启用', tone: 'emerald' },
-  configured: { label: '已配置', tone: 'amber' },
-  partial: { label: '部分启用', tone: 'amber' },
-  not_configured: { label: '未配置', tone: 'slate' },
-};
 
 const BUILTIN_GITHUB_PLUGIN: PluginInfo = {
   id: 'github',
@@ -43,6 +36,8 @@ export function PluginsContent() {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
 
   const fetchPlugins = useCallback(async () => {
     try {
@@ -55,6 +50,35 @@ export function PluginsContent() {
       setLoading(false);
     }
   }, []);
+
+  const handleToggle = useCallback(
+    async (plugin: PluginInfo) => {
+      const isEnabled = plugin.status === 'enabled' || plugin.status === 'partial';
+      const action = isEnabled ? 'disable' : 'enable';
+      const actionLabel = action === 'enable' ? '启用' : '禁用';
+      setTogglingId(plugin.id);
+      setToggleError(null);
+      try {
+        const res = await apiFetch(`/api/plugins/${plugin.id}/${action}`, { method: 'POST' });
+        if (!res.ok) {
+          setToggleError(`插件${actionLabel}失败 (${res.status})`);
+          return;
+        }
+        const data = (await res.json().catch(() => ({}))) as { status?: string; error?: string };
+        const isFailed = data.status === 'failed';
+        const isPartial = data.status === 'partial';
+        if (isFailed || isPartial) {
+          setToggleError(data.error ?? `插件${actionLabel}${isPartial ? '部分成功' : '失败'}`);
+        }
+        await fetchPlugins();
+      } catch {
+        setToggleError('网络错误');
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [fetchPlugins],
+  );
 
   useEffect(() => {
     void fetchPlugins();
@@ -94,44 +118,64 @@ export function PluginsContent() {
 
   return (
     <div className="flex flex-col gap-3.5" data-testid="plugins-list">
+      {toggleError && (
+        <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">
+          {toggleError}
+        </div>
+      )}
       {plugins.map((plugin) => {
-        const statusCfg = STATUS_CONFIG[plugin.status];
         const isExpanded = expandedId === plugin.id;
+        const isRuntimeEnabled = plugin.status === 'enabled' || plugin.status === 'partial';
+        const showResourceToggle = plugin.resources.length > 0 && (plugin.configured || isRuntimeEnabled);
 
         return (
           <article key={plugin.id} className={settingsResourceCardClass}>
-            <button
-              type="button"
-              className={`${settingsResourceRowClass} w-full`}
-              style={{ textAlign: 'left' }}
-              onClick={() => setExpandedId(isExpanded ? null : plugin.id)}
-            >
-              <div
-                className={settingsResourceAvatarClass}
-                style={{ backgroundColor: plugin.iconBg ?? '#9ca3af', color: 'var(--cafe-surface)' }}
+            <div className={`${settingsResourceRowClass} w-full`}>
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-3"
+                style={{ textAlign: 'left' }}
+                onClick={() => setExpandedId(isExpanded ? null : plugin.id)}
               >
-                {plugin.icon === 'github' ? (
-                  <GitHubIcon className="h-5 w-5" color="var(--cafe-surface)" />
-                ) : (
-                  <HubIcon name={plugin.icon ?? 'blocks'} className="h-5 w-5" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <SettingsText as="p" variant="sm" tone="default" className="font-semibold">
-                  {plugin.name}
-                </SettingsText>
-                {plugin.description && (
-                  <SettingsText as="p" tone="secondary" className="mt-0.5">
-                    {plugin.description}
+                <div
+                  className={settingsResourceAvatarClass}
+                  style={{ backgroundColor: plugin.iconBg ?? '#9ca3af', color: 'var(--cafe-surface)' }}
+                >
+                  {plugin.icon === 'github' ? (
+                    <GitHubIcon className="h-5 w-5" color="var(--cafe-surface)" />
+                  ) : (
+                    <HubIcon name={plugin.icon ?? 'blocks'} className="h-5 w-5" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <SettingsText as="p" variant="sm" tone="default" className="font-semibold">
+                    {plugin.name}
                   </SettingsText>
+                  {plugin.description && (
+                    <SettingsText as="p" tone="secondary" className="mt-0.5">
+                      {plugin.description}
+                    </SettingsText>
+                  )}
+                </div>
+              </button>
+              <div className={settingsResourceActionGroupClass}>
+                {/* Config status badge — always visible, purely reflects whether
+                    credentials/config are present. Toggle independently shows on/off. */}
+                <SettingsBadge tone={plugin.configured ? 'amber' : 'slate'} className="shrink-0 font-medium">
+                  {plugin.configured ? '已配置' : '未配置'}
+                </SettingsBadge>
+                {showResourceToggle && (
+                  <SettingsResourceToggleSwitch
+                    enabled={isRuntimeEnabled}
+                    busy={togglingId === plugin.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleToggle(plugin);
+                    }}
+                  />
                 )}
               </div>
-              <div className={settingsResourceActionGroupClass}>
-                <SettingsBadge tone={statusCfg.tone} className="shrink-0 font-medium">
-                  {statusCfg.label}
-                </SettingsBadge>
-              </div>
-            </button>
+            </div>
 
             {isExpanded && <PluginConfigPanel plugin={plugin} onUpdated={fetchPlugins} />}
           </article>

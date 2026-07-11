@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { userInfo } from 'node:os';
 import { basename, isAbsolute, join, type PlatformPath, relative, resolve } from 'node:path';
 
 const SAFE_SEGMENT_RE = /[^a-zA-Z0-9._-]+/g;
@@ -31,8 +31,16 @@ function bootstrapOwnerSegment(): string {
   }
 }
 
+/**
+ * Bootstrap root under /tmp (→ /private/tmp on macOS) instead of os.tmpdir().
+ *
+ * macOS periodically cleans os.tmpdir() (/var/folders/.../T/) during runtime —
+ * when the bootstrap CWD is deleted while a CLI process idles, the next prompt
+ * fails with os.getcwd() → FileNotFoundError → ACP -32603. /tmp is only
+ * cleaned on reboot, so idle processes survive between reboots.
+ */
 export function resolveAcpBootstrapRoot(): string {
-  return join(tmpdir(), `cat-cafe-gemini-acp-${bootstrapOwnerSegment()}`);
+  return join('/tmp', `cat-cafe-acp-bootstrap-${bootstrapOwnerSegment()}`);
 }
 
 export function isPathWithinRoot(

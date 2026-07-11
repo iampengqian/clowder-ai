@@ -13,7 +13,7 @@ export const CAT_CAFE_SPLIT_ENTRYPOINTS = new Map([
   ['cat-cafe-finance', 'finance.js'],
 ]);
 
-/** Use the Node executable that is already running Clowder AI for managed MCP servers. */
+/** Use the Node executable that is already running Cat Café for managed MCP servers. */
 export function resolveCatCafeNodeCommand(): string {
   return process.execPath?.trim() || 'node';
 }
@@ -48,6 +48,10 @@ export const MCP_CALLBACK_ENV_KEYS = [
   'CAT_CAFE_SIGNAL_USER',
   'CAT_CAFE_RUN_TYPE',
   'CAT_CAFE_AUDIT_TOPIC',
+  // NOTE: CAT_CAFE_CREDENTIAL_FILE is intentionally NOT here — it is session-scoped
+  // and injected by the ACP layer (acp-credential-file.ts) at session creation only.
+  // A static per-invocation placeholder would collapse it back to a shared path
+  // (#1099 review P1: superseded processes must not see newer invocation creds).
 ] as const;
 
 /** Patterns that indicate an env key value should be redacted in debug output. */

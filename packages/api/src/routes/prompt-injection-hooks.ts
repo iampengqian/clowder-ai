@@ -1,14 +1,18 @@
 /**
- * Hook script content resolver for prompt injection viewer (F237).
- * Reads .claude/hooks/ shell scripts for H-prefixed segments.
- * Extracted from prompt-injection.ts to respect the 350-line limit.
+ * Hook content resolver for prompt injection viewer (F237 Phase 2).
+ *
+ * Fallback path for segments NOT in TEMPLATE_FILES but registered
+ * via hook.yaml in assets/prompt-hooks/. Uses HookRegistry to
+ * locate the template file and read its content.
+ *
+ * Replaces the old manifest.yaml reader (deleted in Phase 2 sync).
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import YAML from 'yaml';
+import { HookRegistry } from '../domains/prompt-hooks/HookRegistry.js';
 
 function findProjectRoot(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
@@ -17,25 +21,6 @@ function findProjectRoot(): string {
     dir = dirname(dir);
   }
   return process.cwd();
-}
-
-interface ManifestEntry {
-  id: string;
-  source?: string;
-  sourceType?: string;
-  [k: string]: unknown;
-}
-
-let manifestCache: ManifestEntry[] | null = null;
-
-function loadManifestEntries(): ManifestEntry[] {
-  if (manifestCache) return manifestCache;
-  const root = findProjectRoot();
-  const p = join(root, 'assets', 'prompt-injection-manifest.yaml');
-  if (!existsSync(p)) return [];
-  const parsed = YAML.parse(readFileSync(p, 'utf-8')) as { segments?: ManifestEntry[] };
-  manifestCache = Array.isArray(parsed.segments) ? parsed.segments : [];
-  return manifestCache;
 }
 
 export interface HookContentResult {
@@ -48,14 +33,35 @@ export interface HookContentResult {
   vars: string[];
 }
 
-/** Read hook script file for H-prefixed segments. Returns null if not a hook. */
-export async function resolveHookContent(id: string): Promise<HookContentResult | null> {
-  const entry = loadManifestEntries().find((e) => e.id === id);
-  if (!entry || entry.sourceType !== 'hook' || !entry.source) return null;
+// Lazy-init registry singleton (same instance as manifest route)
+let registry: HookRegistry | null = null;
+
+function getRegistry(): HookRegistry {
+  if (registry) return registry;
   const root = findProjectRoot();
-  const scriptPath = join(root, entry.source);
-  if (!existsSync(scriptPath) || !statSync(scriptPath).isFile()) return null;
-  const content = await readFile(scriptPath, 'utf-8');
+  registry = new HookRegistry(join(root, 'assets', 'prompt-hooks'), join(root, 'assets', 'prompt-templates'));
+  registry.scan();
+  return registry;
+}
+
+/**
+ * Read template content for a hook-registered segment.
+ * Returns null if the segment isn't in the hook registry.
+ */
+export async function resolveHookContent(id: string): Promise<HookContentResult | null> {
+  const reg = getRegistry();
+  const hook = reg.getHook(id);
+  if (!hook) return null;
+
+  const { templatePath } = hook;
+  if (!existsSync(templatePath)) return null;
+
+  const content = await readFile(templatePath, 'utf-8');
+  const vars: string[] = [];
+  for (const m of content.matchAll(/\{\{(\w+)\}\}/g)) {
+    if (!vars.includes(m[1])) vars.push(m[1]);
+  }
+
   return {
     segmentId: id,
     allowLocalOverride: false,
@@ -63,6 +69,6 @@ export async function resolveHookContent(id: string): Promise<HookContentResult 
     hasBackup: false,
     content,
     baseContent: content,
-    vars: [],
+    vars,
   };
 }

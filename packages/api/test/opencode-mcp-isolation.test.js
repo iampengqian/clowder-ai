@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, mock, test } from 'node:test';
 import { OpenCodeAgentService } from '../dist/domains/cats/services/agents/providers/OpenCodeAgentService.js';
+import { probeOpenCodeAutoApproveSupport } from '../dist/domains/cats/services/agents/providers/opencode-auto-approval.js';
 import { generateOpenCodeConfig } from '../dist/domains/cats/services/agents/providers/opencode-config-template.js';
 import { collect, createMockProcess, emitOpenCodeEvents } from './helpers/opencode-test-helpers.js';
 
@@ -22,6 +26,50 @@ const STEP_FINISH = {
   sessionID: 'ses_mcp_test',
   part: { type: 'step-finish', reason: 'stop', cost: 0.01, tokens: { total: 5000 } },
 };
+
+function createHiddenAliasOpenCodeCli() {
+  const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-hidden-opencode-cli-'));
+  const file = join(dir, 'opencode');
+  writeFileSync(
+    file,
+    `#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "--help" ]; then
+  echo "opencode run [message..]"
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "--dangerously-skip-permissions" ] && [ "$3" = "--help" ]; then
+  echo "opencode run [message..]"
+  exit 0
+fi
+echo "unknown option" >&2
+exit 1
+`,
+  );
+  chmodSync(file, 0o755);
+  return file;
+}
+
+async function invokeOpenCode(invokeOptions = {}, serviceOptions = {}) {
+  const proc = createMockProcess();
+  const spawnFn = mock.fn(() => proc);
+  const service = new OpenCodeAgentService({
+    catId: 'opencode',
+    spawnFn,
+    model: 'claude-haiku-4-5',
+    ...serviceOptions,
+  });
+
+  const promise = collect(service.invoke('Test', invokeOptions));
+  emitOpenCodeEvents(proc, [STEP_START, TEXT_RESPONSE, STEP_FINISH]);
+  const messages = await promise;
+
+  return { messages, spawnFn };
+}
+
+async function invokeOpenCodeAndCaptureArgs(invokeOptions = {}, serviceOptions = {}) {
+  const { spawnFn } = await invokeOpenCode(invokeOptions, serviceOptions);
+  return spawnFn.mock.calls[0].arguments[1];
+}
 
 // Clowder AI MCP env var names used in assertions below
 
@@ -179,5 +227,121 @@ describe('MCP Tool Namespace Isolation (AC-10)', () => {
     for (const tool of opencodeTools) {
       assert.ok(!tool.startsWith('cat_cafe_'), `opencode tool "${tool}" collides with Clowder AI MCP namespace`);
     }
+  });
+});
+
+describe('OpenCode headless permission mode', () => {
+  test('opencode CLI args auto-approve permissions in headless JSON mode', async () => {
+    const args = await invokeOpenCodeAndCaptureArgs();
+
+    assert.ok(args.includes('--format'), 'must run in JSON event stream mode');
+    assert.ok(args.includes('--auto'), 'must auto-approve permissions for headless runs');
+    assert.equal(args.filter((arg) => arg === '--auto').length, 1, 'must inject auto-approval flag exactly once');
+  });
+
+  test('opencode CLI args do not duplicate user-provided --auto', async () => {
+    const args = await invokeOpenCodeAndCaptureArgs({ cliConfigArgs: ['--auto'] });
+
+    assert.ok(args.includes('--auto'), 'must preserve user-provided public auto-approval flag');
+    assert.equal(args.filter((arg) => arg === '--auto').length, 1, 'must not duplicate auto-approval aliases');
+  });
+
+  test('opencode CLI args let user-provided legacy alias replace default --auto', async () => {
+    const args = await invokeOpenCodeAndCaptureArgs({ cliConfigArgs: ['--dangerously-skip-permissions'] });
+
+    assert.ok(args.includes('--dangerously-skip-permissions'), 'must preserve user-provided legacy alias');
+    assert.equal(
+      args.filter((arg) => arg === '--auto').length,
+      0,
+      'must not inject --auto when user controls approval',
+    );
+  });
+
+  test('opencode auto-approval probe continues without default flag when no known flag is available', async () => {
+    const { messages, spawnFn } = await invokeOpenCode(
+      {},
+      {
+        autoApproveProbeFn: async () => ({}),
+      },
+    );
+
+    assert.equal(spawnFn.mock.calls.length, 1, 'must launch opencode run even when no auto flag is available');
+    assert.ok(
+      messages.some((message) => message.type === 'text'),
+      'must stream the opencode result',
+    );
+    const args = spawnFn.mock.calls[0].arguments[1];
+    assert.equal(args.filter((arg) => arg === '--auto').length, 0, 'must not inject unsupported --auto');
+    assert.equal(
+      args.filter((arg) => arg === '--dangerously-skip-permissions' || arg === '--yolo').length,
+      0,
+      'must not inject a legacy alias unless the probe selected one',
+    );
+  });
+
+  test('opencode auto-approval probe injects selected legacy alias', async () => {
+    const args = await invokeOpenCodeAndCaptureArgs(
+      {},
+      {
+        autoApproveProbeFn: async () => ({
+          approvalFlag: '--dangerously-skip-permissions',
+        }),
+      },
+    );
+
+    assert.ok(args.includes('--dangerously-skip-permissions'), 'must inject the selected legacy alias');
+    assert.equal(args.filter((arg) => arg === '--auto').length, 0, 'must not inject --auto when legacy alias wins');
+  });
+
+  test('opencode auto-approval probe injects --auto when selected', async () => {
+    const args = await invokeOpenCodeAndCaptureArgs(
+      {},
+      {
+        autoApproveProbeFn: async () => ({
+          approvalFlag: '--auto',
+        }),
+      },
+    );
+
+    assert.ok(args.includes('--auto'), 'must inject --auto when the probe selects it');
+    assert.equal(args.filter((arg) => arg === '--auto').length, 1, 'must inject --auto exactly once');
+  });
+
+  test('opencode auto-approval probe detects hidden legacy aliases', async () => {
+    const command = createHiddenAliasOpenCodeCli();
+
+    const result = await probeOpenCodeAutoApproveSupport(command);
+
+    assert.equal(result.approvalFlag, '--dangerously-skip-permissions');
+  });
+
+  test('opencode auto-approval probe retries after transient warning result', async () => {
+    const procs = [createMockProcess(), createMockProcess()];
+    let spawnIndex = 0;
+    const spawnFn = mock.fn(() => procs[spawnIndex++]);
+    let probeAttempts = 0;
+    const service = new OpenCodeAgentService({
+      catId: 'opencode',
+      spawnFn,
+      model: 'claude-haiku-4-5',
+      autoApproveProbeFn: async () => {
+        probeAttempts++;
+        return probeAttempts === 1 ? { warning: 'transient probe failure' } : { approvalFlag: '--auto' };
+      },
+    });
+
+    const firstInvocation = collect(service.invoke('Test'));
+    emitOpenCodeEvents(procs[0], [STEP_START, TEXT_RESPONSE, STEP_FINISH]);
+    await firstInvocation;
+
+    const secondInvocation = collect(service.invoke('Test'));
+    emitOpenCodeEvents(procs[1], [STEP_START, TEXT_RESPONSE, STEP_FINISH]);
+    await secondInvocation;
+
+    const firstArgs = spawnFn.mock.calls[0].arguments[1];
+    const secondArgs = spawnFn.mock.calls[1].arguments[1];
+    assert.equal(firstArgs.filter((arg) => arg === '--auto').length, 0, 'first transient warning omits default flag');
+    assert.equal(probeAttempts, 2, 'transient warning results must not be cached');
+    assert.ok(secondArgs.includes('--auto'), 'second invocation must retry and inject --auto when probe succeeds');
   });
 });

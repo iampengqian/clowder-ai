@@ -63,6 +63,7 @@ export { projectsBootstrapRoutes } from './projects-bootstrap.js';
 export { mkdirRoute } from './projects-mkdir.js';
 export { projectSetupRoute } from './projects-setup.js';
 export { promptInjectionRoutes } from './prompt-injection.js';
+export { promptInjectionManifestRoutes } from './prompt-injection-manifest.js';
 export { promptInjectionPreviewRoutes } from './prompt-injection-preview.js';
 export { proposalRoutes } from './proposal-routes.js';
 export { pushRoutes } from './push.js';

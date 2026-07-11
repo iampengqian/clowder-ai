@@ -495,6 +495,15 @@ export {
   generateSessionId,
   generateThreadId,
 } from './ids.js';
+// F237: Injection Trace types (v0 — observability layer)
+export type {
+  DeliveryChannel,
+  InjectionStage,
+  InjectionTraceDetail,
+  InjectionTraceSummary,
+  ObservedSegment,
+  StageDeliveryDecision,
+} from './injection-trace.js';
 // Intent Card + Need Audit types (F076 需求翻译官)
 export type {
   CreateIntentCardInput,
@@ -534,6 +543,8 @@ export type {
   LimbActionLogEntry,
   LimbAuthLevel,
   LimbCapability,
+  LimbCommandParamSchema,
+  LimbCommandSchema,
   LimbInvokeResult,
   LimbLease,
   LimbNodeRecord,
@@ -667,6 +678,35 @@ export {
   COLLECTION_SIGNAL_KINDS,
   isAllowedCollectionSignal,
 } from './profile-update.js';
+export type {
+  ActiveParticipantInput,
+  AssemblerInput,
+  BootcampInput,
+  CallableMentionsData,
+  CatConfigSnapshot,
+  CrossThreadHintInput,
+  DirectMessageInfo,
+  GovernanceTier,
+  HookManifest,
+  HookResolver,
+  HookStage,
+  PingPongInput,
+  PromptPatch,
+  RegisteredHook,
+  ResolveResult,
+  RoutingMode,
+  SafetyTier,
+  SopStageInput,
+  TeammateSnapshot,
+  TraceEvent,
+  TraceEventDisabled,
+  TraceEventFired,
+  TraceEventObserved,
+  TraceEventSkipped,
+  TraceEventSummary,
+  TransparencyTier,
+  WorldContextInput,
+} from './prompt-hook.js';
 // Proposal types (F128 Cat Thread Proposal)
 export type {
   ProposalApproveOverrides,

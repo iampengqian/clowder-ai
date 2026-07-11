@@ -157,7 +157,7 @@ import {
   ReviewFeedbackRouter,
 } from './infrastructure/email/index.js';
 import { fetchLatestIssueCommentCursor, maxGithubId } from './infrastructure/github/comment-cursors.js';
-import { buildGhCliEnv, resolveGhCliToken } from './infrastructure/github/gh-cli-env.js';
+import { buildGhCliEnv, resolveGhCliToken, withHiddenGhCliWindow } from './infrastructure/github/gh-cli-env.js';
 import type { EvalDomainId } from './infrastructure/harness-eval/domain/eval-domain-registry.js';
 import { runSchedulerReplyUserIdBackfill } from './infrastructure/scheduler/scheduler-reply-userid-backfill.js';
 import { securityHeadersPlugin } from './infrastructure/security-headers.js';
@@ -228,6 +228,7 @@ import {
   projectSetupRoute,
   projectsBootstrapRoutes,
   projectsRoutes,
+  promptInjectionManifestRoutes,
   promptInjectionPreviewRoutes,
   promptInjectionRoutes,
   proposalRoutes,
@@ -483,6 +484,12 @@ async function main(): Promise<void> {
   if (redis) {
     const { wireRedisGroundingSampleStore } = await import('./infrastructure/grounding/grounding-sample-singleton.js');
     wireRedisGroundingSampleStore(redis);
+  }
+
+  // F237: bootstrap injection trace store (fail-open — no Redis → no traces)
+  if (redis) {
+    const { bootstrapTraceStore } = await import('./domains/prompt-hooks/trace-bootstrap.js');
+    bootstrapTraceStore(redis);
   }
 
   // F174 Phase B: select InvocationRegistry backend.
@@ -1314,6 +1321,17 @@ async function main(): Promise<void> {
             service = new A2AAgentService({ catId, config: { url: a2aUrl } });
             break;
           }
+          case 'invaluable': {
+            const { InvaluableAgentService } = await import(
+              './domains/cats/services/agents/providers/InvaluableAgentService.js'
+            );
+            service = new InvaluableAgentService({
+              catId,
+              dataDir: `.loop/${id}`,
+              name: id,
+            });
+            break;
+          }
           default:
             app.log.warn(`[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`);
             continue;
@@ -1589,6 +1607,10 @@ async function main(): Promise<void> {
   // Shared instance — lightweight (just holds a Redis ref, no state).
   const freshnessStateStore = redis ? new FreshnessInvocationStateStore(redis) : undefined;
 
+  // F237 Phase 2: InjectionTraceStore — prompt injection trace persistence
+  const { InjectionTraceStore: _ITSEarly } = await import('./domains/prompt-hooks/InjectionTraceStore.js');
+  const injectionTraceStore = redis ? new _ITSEarly(redis) : undefined;
+
   // Shared AgentRouter — used by messagesRoutes and invocationsRoutes
   router = new AgentRouter({
     agentRegistry,
@@ -1629,6 +1651,7 @@ async function main(): Promise<void> {
     cloudInvokeBridge,
     ...(freshnessReinvokeCheck ? { freshnessReinvokeCheck } : {}),
     ...(freshnessStateStore ? { freshnessStateStore } : {}),
+    ...(injectionTraceStore ? { injectionTraceStore } : {}),
   });
 
   // F39: Message queue delivery
@@ -2236,11 +2259,11 @@ async function main(): Promise<void> {
   const getGitHubToken = (): string | undefined => {
     return resolveGhCliToken({ pluginEnv: getGitHubPluginEnv() });
   };
-  const getGitHubExecOptions = (timeout: number): { timeout: number; env?: NodeJS.ProcessEnv } => {
-    return {
+  const getGitHubExecOptions = (timeout: number): { timeout: number; env?: NodeJS.ProcessEnv; windowsHide: true } => {
+    return withHiddenGhCliWindow({
       timeout,
       env: buildGhCliEnv({ token: getGitHubToken() }),
-    };
+    });
   };
   const { createRepoActivityTemplate } = await import('./infrastructure/scheduler/templates/repo-activity.js');
   templateRegistry.register(createRepoActivityTemplate({ getGitHubToken }));
@@ -2292,13 +2315,16 @@ async function main(): Promise<void> {
       './domains/plugin/PluginResourceActivator.js'
     );
     const { ScheduleFactoryRegistry } = await import('./domains/plugin/ScheduleFactoryRegistry.js');
+    const { PluginLimbAdapter } = await import('./domains/limb/PluginLimbAdapter.js');
+    const { loadLimbDeclaration } = await import('./domains/limb/limb-yaml-loader.js');
+    const { weixinMpHandlers } = await import('./plugins/weixin-mp/index.js');
     const { registerPluginRoutes } = await import('./routes/plugin-routes.js');
     const { generateCliConfigs, readCapabilitiesConfig, writeCapabilitiesConfig, withCapabilityLock } = await import(
       './config/capabilities/capability-orchestrator.js'
     );
     const { resolveStartupCliConfigContext } = await import('./config/capabilities/startup-cli-config.js');
     const monorepoRoot = findMonorepoRoot(process.cwd());
-    const pluginsDir = join(monorepoRoot, 'plugins');
+    const pluginsDir = join(monorepoRoot, 'packages', 'api', 'src', 'plugins');
     const { loadAllPluginConfigs, resolvePluginEnv } = await import('./domains/plugin/plugin-config-store.js');
     const pluginRegistry = new PluginRegistry(pluginsDir);
     pluginRegistry.scan();
@@ -2312,7 +2338,10 @@ async function main(): Promise<void> {
       return githubManifest ? resolvePluginEnv([githubManifest]) : {};
     };
 
-    const limbAdapterRegistry = new Map<string, (yamlPath: string) => Promise<ILimbNode>>();
+    const limbAdapterRegistry = new Map<
+      string,
+      (yamlPath: string, pluginConfig: Record<string, string>) => Promise<ILimbNode>
+    >();
 
     // F202 Phase 2: Schedule factory registry + GitHub factories
     const scheduleFactoryRegistry = new ScheduleFactoryRegistry();
@@ -2322,11 +2351,17 @@ async function main(): Promise<void> {
     // F202-2B: Mutable deps ref — starts with just log, populated with full GitHub deps later
     const scheduleFactoryDeps: Record<string, unknown> = { log: app.log };
 
+    limbAdapterRegistry.set('weixin-mp', async (yamlPath, pluginConfig) => {
+      const declaration = loadLimbDeclaration(yamlPath);
+      return new PluginLimbAdapter({ declaration, pluginConfig, redis, handlers: weixinMpHandlers });
+    });
+
     const pluginActivator = new PluginResourceActivator({
       resolveProjectRoot: () => resolveActiveProjectRoot(),
       resolveMainProjectRoot: () => monorepoRoot,
       pluginsDir,
       limbRegistry,
+      skillsSourceDir: join(monorepoRoot, 'cat-cafe-skills'),
       readCapabilities: () => readCapabilitiesConfig(resolveActiveProjectRoot()),
       writeCapabilities: async (config) => {
         const root = resolveActiveProjectRoot();
@@ -2335,7 +2370,7 @@ async function main(): Promise<void> {
         await generateCliConfigs(config, paths, projectRoot);
       },
       withCapabilityLock: (fn) => withCapabilityLock(resolveActiveProjectRoot(), fn),
-      limbAdapterFactory: async (pluginId, limbYamlPath) => {
+      limbAdapterFactory: async (pluginId, limbYamlPath, pluginConfig) => {
         const factory = limbAdapterRegistry.get(pluginId);
         if (!factory) {
           throw new Error(
@@ -2343,7 +2378,7 @@ async function main(): Promise<void> {
               `Limb resources require a concrete adapter (see Phase 2 for examples).`,
           );
         }
-        return factory(limbYamlPath);
+        return factory(limbYamlPath, pluginConfig);
       },
       // F202 Phase 2: schedule resource activation deps
       scheduleFactoryRegistry,
@@ -2510,6 +2545,9 @@ async function main(): Promise<void> {
     ...(workflowSopStore ? { workflowSopStore } : {}),
     queueProcessor,
     invocationQueue,
+    indexBuilder: memoryServices.indexBuilder as
+      | { markThreadDirty(threadId: string): void; flushDirtyThreads?(): number | Promise<number> }
+      | undefined,
     evidenceStore: memoryServices.evidenceStore,
     markerQueue: memoryServices.markerQueue,
     reflectionService: memoryServices.reflectionService,
@@ -2862,7 +2900,7 @@ async function main(): Promise<void> {
         '-f',
         'per_page=100',
       ],
-      { timeout: 60_000 },
+      getGitHubExecOptions(60_000),
     );
     if (!stdout.trim()) return [];
     return stdout
@@ -2889,7 +2927,7 @@ async function main(): Promise<void> {
         '-f',
         'per_page=100',
       ],
-      { timeout: 60_000 },
+      getGitHubExecOptions(60_000),
     );
     if (!stdout.trim()) return [];
     return stdout
@@ -2912,7 +2950,7 @@ async function main(): Promise<void> {
         '--jq',
         '.[] | {user: .user.login, state, commit_id}',
       ],
-      { timeout: 30_000 },
+      getGitHubExecOptions(30_000),
     );
     if (!stdout.trim()) return [];
     return stdout
@@ -3047,6 +3085,12 @@ async function main(): Promise<void> {
       mentionPatterns: [...b.mentionPatterns],
       variants: b.variants.map((v) => ({
         catId: v.catId,
+        // clowder-ai#1090: forward variant-scoped identity so the sanitizer
+        // redacts renamed members (multi-variant breeds now persist
+        // per-member name / nickname; without these fields the sanitizer
+        // would rebuild the redaction set from breed identity only).
+        name: v.name,
+        nickname: v.nickname,
         displayName: v.displayName,
         variantLabel: v.variantLabel,
         mentionPatterns: v.mentionPatterns ? [...v.mentionPatterns] : undefined,
@@ -3147,6 +3191,7 @@ async function main(): Promise<void> {
   await app.register(configSecretsRoutes);
   await app.register(rulesRoutes);
   await app.register(promptInjectionRoutes);
+  await app.register(promptInjectionManifestRoutes);
   await app.register(promptInjectionPreviewRoutes);
   await app.register(servicesRoutes, {
     lifecycle: {
@@ -3582,6 +3627,24 @@ async function main(): Promise<void> {
       await pool.closeAll();
     }
     acpPoolRegistry.clear();
+  });
+
+  app.addHook('onClose', async () => {
+    const { InvaluableNodeManager } = await import('./domains/cats/services/agents/providers/InvaluableNodeManager.js');
+    InvaluableNodeManager.getInstance().stopAll();
+  });
+
+  // Invaluable P2P inference gateway — bridges AgentBrain model requests to Clowder's providers
+  const { invaluableInferenceGateway } = await import('./routes/invaluable-inference-gateway.js');
+  await app.register(invaluableInferenceGateway, {
+    resolveApiKey: (provider: string) => {
+      switch (provider) {
+        case 'anthropic': return process.env.ANTHROPIC_API_KEY;
+        case 'openai': return process.env.OPENAI_API_KEY;
+        case 'google': return process.env.GOOGLE_API_KEY;
+        default: return undefined;
+      }
+    },
   });
 
   // F101: register onClose hook BEFORE listen (Fastify forbids addHook after listen).

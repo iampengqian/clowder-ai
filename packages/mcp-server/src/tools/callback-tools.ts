@@ -1,6 +1,12 @@
 /**
  * MCP Callback Tools — core callbacks
  * 鉴权: process.env CAT_CAFE_INVOCATION_ID + CAT_CAFE_CALLBACK_TOKEN
+ *
+ * #1092 credential refresh: When CAT_CAFE_CREDENTIAL_FILE is set, invocationId
+ * and callbackToken are re-read from the file on each callback call. This lets
+ * the MCP server subprocess pick up fresh credentials after a session resume
+ * without needing to be restarted. The API writes the file before each invocation;
+ * the MCP server reads it before each callback.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -105,17 +111,47 @@ function resolveAgentKeySecret(options?: AgentKeyOptions): string | undefined {
   return readAgentKeyFile(process.env.CAT_CAFE_AGENT_KEY_FILE);
 }
 
+/**
+ * #1092: Read fresh invocation credentials from a file.
+ * The API writes { invocationId, callbackToken } to this file before each
+ * invocation. The MCP server re-reads it on every callback call so that
+ * a long-lived subprocess (persisting across ACP session resume) always
+ * sends the current invocationId — not the stale one from process.env.
+ *
+ * Returns null on any error (missing file, bad JSON, missing fields) —
+ * callers fall back to process.env values.
+ */
+function readCredentialFile(): { invocationId: string; callbackToken: string } | null {
+  const filePath = process.env.CAT_CAFE_CREDENTIAL_FILE;
+  if (!filePath) return null;
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const invocationId = typeof parsed.invocationId === 'string' ? parsed.invocationId : '';
+    const callbackToken = typeof parsed.callbackToken === 'string' ? parsed.callbackToken : '';
+    if (invocationId && callbackToken) return { invocationId, callbackToken };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function getCallbackConfig(options?: AgentKeyOptions): CallbackConfig | null {
   const apiUrl = process.env.CAT_CAFE_API_URL;
   if (!apiUrl) return null;
 
-  const invocationId = process.env.CAT_CAFE_INVOCATION_ID;
-  const callbackToken = process.env.CAT_CAFE_CALLBACK_TOKEN;
   const agentKeySecret = resolveAgentKeySecret(options);
   if (options?.forceAgentKey === true) {
     if (!agentKeySecret) return null;
     return { apiUrl, agentKeySecret };
   }
+
+  // #1092: Prefer credential file over process.env for invocation creds.
+  // The file is updated per-invocation by the API; process.env is set once
+  // at subprocess spawn and goes stale after session resume.
+  const fileCreds = readCredentialFile();
+  const invocationId = fileCreds?.invocationId ?? process.env.CAT_CAFE_INVOCATION_ID;
+  const callbackToken = fileCreds?.callbackToken ?? process.env.CAT_CAFE_CALLBACK_TOKEN;
 
   if (!invocationId && !callbackToken && !agentKeySecret) return null;
 
@@ -2009,6 +2045,73 @@ export async function handleSetReadMode(input: { mode: 'anchor' | 'full' }): Pro
   }
 }
 
+// #872: Thread Metadata MCP — get/set low-frequency metadata anchors
+export async function handleGetThreadMetadata(): Promise<ToolResult> {
+  return callbackGet('/api/callbacks/thread-metadata');
+}
+
+export const setThreadMetadataInputSchema = {
+  title: z.string().min(1).optional().describe('Update thread title (replaces existing)'),
+  labels: z.array(z.string()).optional().describe('Update thread labels (replaces entire array)'),
+  worktrees: z.array(z.string()).optional().describe('Worktree paths to add (append + dedupe)'),
+  prs: z
+    .array(z.object({ repo: z.string().min(1), number: z.number().int().positive() }))
+    .optional()
+    .describe('PRs to add (append + dedupe by repo#number)'),
+  issues: z
+    .array(z.object({ repo: z.string().min(1), number: z.number().int().positive() }))
+    .optional()
+    .describe('Issues to add (append + dedupe by repo#number)'),
+  features: z.array(z.string()).optional().describe('Feature IDs to add (append + dedupe)'),
+  notes: z
+    .record(z.string(), z.string().nullable())
+    .optional()
+    .describe('Free-form KV notes: string value sets key, null deletes key'),
+  removeWorktrees: z.array(z.string()).optional().describe('Worktree paths to remove'),
+  removePrs: z
+    .array(z.object({ repo: z.string().min(1), number: z.number().int().positive() }))
+    .optional()
+    .describe('PRs to remove (matched by repo#number)'),
+  removeIssues: z
+    .array(z.object({ repo: z.string().min(1), number: z.number().int().positive() }))
+    .optional()
+    .describe('Issues to remove (matched by repo#number)'),
+  removeFeatures: z.array(z.string()).optional().describe('Feature IDs to remove'),
+};
+
+export async function handleSetThreadMetadata(input: {
+  title?: string;
+  labels?: string[];
+  worktrees?: string[];
+  prs?: Array<{ repo: string; number: number }>;
+  issues?: Array<{ repo: string; number: number }>;
+  features?: string[];
+  notes?: Record<string, string | null>;
+  removeWorktrees?: string[];
+  removePrs?: Array<{ repo: string; number: number }>;
+  removeIssues?: Array<{ repo: string; number: number }>;
+  removeFeatures?: string[];
+}): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'set_thread_metadata',
+    primary: () =>
+      callbackPost('/api/callbacks/set-thread-metadata', {
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.labels !== undefined ? { labels: input.labels } : {}),
+        ...(input.worktrees !== undefined ? { worktrees: input.worktrees } : {}),
+        ...(input.prs !== undefined ? { prs: input.prs } : {}),
+        ...(input.issues !== undefined ? { issues: input.issues } : {}),
+        ...(input.features !== undefined ? { features: input.features } : {}),
+        ...(input.notes !== undefined ? { notes: input.notes } : {}),
+        ...(input.removeWorktrees !== undefined ? { removeWorktrees: input.removeWorktrees } : {}),
+        ...(input.removePrs !== undefined ? { removePrs: input.removePrs } : {}),
+        ...(input.removeIssues !== undefined ? { removeIssues: input.removeIssues } : {}),
+        ...(input.removeFeatures !== undefined ? { removeFeatures: input.removeFeatures } : {}),
+      }),
+    policy: { kind: 'none' },
+  });
+}
+
 export const callbackTools = [
   {
     name: 'cat_cafe_post_message',
@@ -2493,5 +2596,25 @@ export const callbackTools = [
       'GOTCHA: Requires Clowder AI managed session (CAT_CAFE_INVOCATION_ID).',
     inputSchema: setReadModeInputSchema,
     handler: handleSetReadMode,
+  },
+  {
+    name: 'cat_cafe_get_thread_metadata',
+    description:
+      'Read low-frequency metadata anchors for the current thread: worktree paths, associated PRs/issues, ' +
+      'feature links, labels, title, and free-form notes. Call at session start or handoff to recover context. ' +
+      'Returns all metadata fields; missing fields are omitted (not null).',
+    inputSchema: {},
+    handler: handleGetThreadMetadata,
+  },
+  {
+    name: 'cat_cafe_set_thread_metadata',
+    description:
+      'Write low-frequency metadata anchors for the current thread. Merge semantics: ' +
+      'title/labels REPLACE; worktrees/prs/issues/features APPEND with dedupe (use remove* fields to remove); ' +
+      'notes MERGE (string sets, null deletes key). ' +
+      'WHEN: after creating a worktree, PR, or issue association — NOT for dynamic state. ' +
+      'SCOPE: current thread only (no threadId param); cross-thread writes are impossible.',
+    inputSchema: setThreadMetadataInputSchema,
+    handler: handleSetThreadMetadata,
   },
 ] as const;

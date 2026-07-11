@@ -595,6 +595,8 @@ export interface AgentRouterOptions {
   freshnessReinvokeCheck?: import('../invocation/invoke-single-cat.js').InvocationDeps['freshnessReinvokeCheck'];
   /** F254 Phase C: Freshness state store for carrier tier persistence */
   freshnessStateStore?: import('../../freshness/FreshnessInvocationStateStore.js').FreshnessInvocationStateStore;
+  /** F237 Phase 2 (AC-P2-8): Injection trace store for pipeline observability */
+  injectionTraceStore?: import('../../../../prompt-hooks/InjectionTraceStore.js').InjectionTraceStore;
 }
 
 /**
@@ -665,6 +667,8 @@ export class AgentRouter {
   private freshnessReinvokeCheck?: import('../invocation/invoke-single-cat.js').InvocationDeps['freshnessReinvokeCheck'];
   /** F254 Phase C */
   private freshnessStateStore?: import('../../freshness/FreshnessInvocationStateStore.js').FreshnessInvocationStateStore;
+  /** F237 Phase 2 (AC-P2-8) */
+  private injectionTraceStore?: import('../../../../prompt-hooks/InjectionTraceStore.js').InjectionTraceStore;
   private speechMentionRe: RegExp;
 
   /**
@@ -774,6 +778,7 @@ export class AgentRouter {
     this.cloudInvokeBridge = options.cloudInvokeBridge;
     this.freshnessReinvokeCheck = options.freshnessReinvokeCheck;
     this.freshnessStateStore = options.freshnessStateStore;
+    this.injectionTraceStore = options.injectionTraceStore;
   }
 
   refreshFromRegistry(agentRegistry: AgentRegistry): void {
@@ -1386,6 +1391,7 @@ export class AgentRouter {
       ...(this.frustrationIssueStore ? { frustrationIssueStore: this.frustrationIssueStore } : {}),
       ...(this.pendingRequestStore ? { pendingRequestStore: this.pendingRequestStore } : {}),
       ...(this.ballCustody ? { ballCustody: this.ballCustody } : {}),
+      ...(this.injectionTraceStore ? { injectionTraceStore: this.injectionTraceStore } : {}),
     };
   }
 

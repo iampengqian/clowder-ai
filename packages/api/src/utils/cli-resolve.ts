@@ -6,7 +6,7 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -40,6 +40,32 @@ function collectNvmBinDirs(): string[] {
 }
 
 const resolvedCache = new Map<string, string>();
+
+function normalizeWindowsDir(path: string): string {
+  return win32
+    .dirname(path)
+    .replace(/[\\/]+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * Select the effective Windows PATH hit while preserving directory order.
+ *
+ * `where <command>` can return multiple entries from the same directory
+ * (for example `codex` and `codex.exe` from the Windows Store alias dir).
+ * We only apply `.cmd` / `.exe` preference within the first directory bucket;
+ * later directories must not override an earlier PATH wrapper/version pin.
+ */
+export function selectWindowsPathEntry(lines: readonly string[]): string | null {
+  if (lines.length === 0) return null;
+  const firstDir = normalizeWindowsDir(lines[0]);
+  const firstDirHits = lines.filter((line) => normalizeWindowsDir(line) === firstDir);
+  return (
+    firstDirHits.find((line) => /\.cmd$/i.test(line)) ||
+    firstDirHits.find((line) => /\.exe$/i.test(line)) ||
+    firstDirHits[0]
+  );
+}
 
 /**
  * Drop a cache entry. Accepts EITHER the bare command name (cache key) OR the
@@ -93,8 +119,7 @@ export function resolveCliCommand(command: string, opts?: { skipPathProbe?: bool
           .split('\n')
           .map((l) => l.trim())
           .filter(Boolean);
-        // On Windows, prefer the .cmd shim (more reliable for shim resolution)
-        const resolved = (IS_WINDOWS && lines.find((l) => /\.cmd$/i.test(l))) || lines[0];
+        const resolved = (IS_WINDOWS && selectWindowsPathEntry(lines)) || lines[0];
         resolvedCache.set(command, resolved);
         return resolved;
       }

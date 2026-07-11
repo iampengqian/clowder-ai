@@ -821,3 +821,31 @@ describe('#699: inline reply-to preview', () => {
     assert.ok(!result.contextText.includes('↩'), 'reply should not have preview when parent is filtered out');
   });
 });
+
+// ---------------------------------------------------------------------------
+// resolveDirectMessage — unknown sender fallback (F237 dual-path regression)
+// ---------------------------------------------------------------------------
+
+describe('resolveDirectMessage — unknown sender fallback', () => {
+  test('returns fallback DirectMessageInfo for sender not in catRegistry', async () => {
+    const { resolveDirectMessage } = await import('../dist/domains/prompt-hooks/context-assembler.js');
+    // 'nonexistent-cat-xyz' is not in catRegistry
+    const result = resolveDirectMessage('nonexistent-cat-xyz', 'opus', '布偶猫');
+    assert.ok(result !== null, 'must not suppress D2 for unknown sender');
+    assert.equal(result.fromCatId, 'nonexistent-cat-xyz');
+    assert.equal(result.fromLabel, 'nonexistent-cat-xyz', 'fallback label = raw catId');
+    assert.equal(result.fromModel, 'unknown', 'fallback model = unknown');
+    assert.equal(result.isSameBreed, false, 'cannot determine breed without config');
+  });
+
+  test('returns null when sender is self', async () => {
+    const { resolveDirectMessage } = await import('../dist/domains/prompt-hooks/context-assembler.js');
+    const result = resolveDirectMessage('opus', 'opus', '布偶猫');
+    assert.equal(result, null);
+  });
+
+  test('returns null when no sender', async () => {
+    const { resolveDirectMessage } = await import('../dist/domains/prompt-hooks/context-assembler.js');
+    assert.equal(resolveDirectMessage(undefined, 'opus', '布偶猫'), null);
+  });
+});

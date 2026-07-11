@@ -5,10 +5,11 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, mock, test } from 'node:test';
+import { catRegistry } from '@cat-cafe/shared';
 import { fakeL0Compiler } from './helpers/fake-l0-compiler.js';
 
 const { CodexAgentService, isGitRepositoryPath } = await import(
@@ -533,15 +534,23 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
       await promise;
 
       const args = spawnFn.mock.calls[0].arguments[1];
-      // Disabled capabilities still need a per-invocation override because
-      // Codex layers project/user config.toml entries after persistent cleanup.
+      // #1072 fix: disabled servers emit a complete dummy shape (command +
+      // args + enabled=false) to suppress any stale .codex/config.toml entries.
+      // Bare `enabled=false` fails Codex ≥0.142 schema validation; including
+      // command+args satisfies the schema (same principle as legacy cat-cafe shim).
       assert.ok(
-        args.includes('mcp_servers.cat-cafe-collab.enabled=false'),
-        'disabled runtime capability must emit enabled=false so layered config.toml entries cannot revive it',
+        args.includes('mcp_servers.cat-cafe-collab.command="echo"'),
+        'disabled entry must emit dummy command to suppress stale config.toml',
       );
       assert.ok(
-        !args.some((a) => a.startsWith('mcp_servers.cat-cafe-collab.command=')),
-        'disabled runtime capability should not emit launch fields',
+        args.some((a) => a.includes('mcp_servers.cat-cafe-collab.args=') && a.includes('disabled-shim')),
+        'disabled entry must emit dummy args for schema compliance',
+      );
+      assert.ok(args.includes('mcp_servers.cat-cafe-collab.enabled=false'), 'disabled entry must emit enabled=false');
+      // No callback env or workspace injection for disabled entries
+      assert.ok(
+        !args.some((a) => a.includes('mcp_servers.cat-cafe-collab.env.')),
+        'disabled entry must not receive env injection',
       );
       assert.ok(
         args.includes(`mcp_servers.cat-cafe-memory.command=${JSON.stringify(process.execPath)}`),
@@ -573,7 +582,12 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     }
   });
 
-  test('Codex MCP config keeps managed split authority when same-name external entry has unsupported transport', async () => {
+  test('Codex MCP config suppresses external entry with unsupported transport as disabled dummy', async () => {
+    // #1072 fix: external entry with managed name but unsupported transport
+    // resolves as disabled (transport unsupported for this provider). The
+    // disabled handler emits a complete dummy shape (command + args +
+    // enabled=false) to suppress any stale config.toml entries — stale user
+    // paths and secrets must never leak into CLI args.
     const runtimeRoot = makeTempDir('.tmp-codex-managed-shadow-root-');
     const projectDir = makeTempDir('.tmp-codex-managed-shadow-project-');
     const proc = createMockProcess();
@@ -623,19 +637,908 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
           await promise;
 
           const args = spawnFn.mock.calls[0].arguments[1];
-          const limbArgsConfig = args.find((arg) => arg.startsWith('mcp_servers.cat-cafe-limb.args=['));
-          assert.ok(args.includes(`mcp_servers.cat-cafe-limb.command=${JSON.stringify(process.execPath)}`));
-          assert.ok(limbArgsConfig?.includes('packages/mcp-server/dist/limb.js'));
-          assert.ok(args.includes(`mcp_servers.cat-cafe-limb.env.ALLOWED_WORKSPACE_DIRS="${projectDir}"`));
-          assert.ok(args.includes('mcp_servers.cat-cafe-limb.env.CAT_CAFE_INVOCATION_ID="inv-managed-shadow"'));
+          // Entry is disabled (transport unsupported) → emits dummy suppression shape
+          assert.ok(
+            args.includes('mcp_servers.cat-cafe-limb.command="echo"'),
+            'disabled entry must emit dummy command to suppress stale config.toml',
+          );
+          assert.ok(args.includes('mcp_servers.cat-cafe-limb.enabled=false'), 'disabled entry must emit enabled=false');
+          // Stale user paths and secrets must never leak
           assert.ok(
             !args.some(
               (arg) => arg.includes('/stale/user') || arg.includes('STALE_SECRET') || arg.includes('must-not-leak'),
             ),
+            'stale user paths and secrets must never leak into CLI args',
           );
         });
       });
     } finally {
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config resolves runtime binary + managed env for same-repo external split', async () => {
+    // #1072 regression test: ensureCatCafeMainServer migration can leave a
+    // split entry with source='external' but binary pointing to our own repo
+    // dist (isSameRepoExternalSplit). These entries must:
+    //   1. Resolve binary from current mcpDistDir (not the entry's stale args[0])
+    //   2. Receive managed env injection (callback env, workspace dirs, approval mode)
+    const runtimeRoot = makeTempDir('.tmp-codex-same-repo-ext-');
+    const projectDir = makeTempDir('.tmp-codex-same-repo-ext-project-');
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      // Same-repo external shape: source='external', args[0] ends with
+      // packages/mcp-server/dist/limb.js but uses a STALE worktree path
+      // (different from current runtimeRoot). The code must resolve from
+      // current mcpDistDir, not trust the stale absolute path.
+      const staleLimbPath = '/old/worktree/packages/mcp-server/dist/limb.js';
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'cat-cafe-limb',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: { command: 'node', args: [staleLimbPath] },
+        },
+      ]);
+
+      const currentLimbPath = join(runtimeRoot, 'packages', 'mcp-server', 'dist', 'limb.js');
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello same-repo external', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-same-repo',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-same-repo',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-same-repo' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          // Same-repo external split should be injected (enabled, stdio transport)
+          assert.ok(
+            args.includes('mcp_servers.cat-cafe-limb.enabled=true'),
+            'same-repo external split must be injected as enabled',
+          );
+          // Must use current runtime binary, not stale worktree path
+          assert.ok(
+            args.some((a) => a.includes(`mcp_servers.cat-cafe-limb.args=`) && a.includes(currentLimbPath)),
+            'same-repo external split must resolve binary from current mcpDistDir, not stale args[0]',
+          );
+          assert.ok(!args.some((a) => a.includes('/old/worktree/')), 'stale worktree path must not appear in CLI args');
+          // Must receive managed approval mode and callback env injection
+          assert.ok(
+            args.some((a) => a.includes('mcp_servers.cat-cafe-limb.default_tools_approval_mode=')),
+            'same-repo external split must receive approval mode injection',
+          );
+          assert.ok(
+            args.some((a) => a.includes('mcp_servers.cat-cafe-limb.env.ALLOWED_WORKSPACE_DIRS=')),
+            'same-repo external split must receive workspace dir injection',
+          );
+          assert.ok(
+            args.some((a) => a.includes('mcp_servers.cat-cafe-limb.env.CAT_CAFE_API_URL=')),
+            'same-repo external split must receive callback env injection',
+          );
+        });
+      });
+    } finally {
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config injects streamableHttp URL for enabled entries', async () => {
+    // Codex CLI supports URL-based MCP servers (codex mcp add --url).
+    // Verify that streamableHttp entries with a valid URL are injected
+    // via --config mcp_servers.X.url=... instead of command/args.
+    // resolveServersForCat requires the cat to be registered with a provider
+    // in STREAMABLE_HTTP_PROVIDERS for streamableHttp to be enabled.
+    const runtimeRoot = makeTempDir('.tmp-codex-streamable-http-');
+    const projectDir = makeTempDir('.tmp-codex-streamable-http-project-');
+    const savedConfigs = catRegistry.getAllConfigs();
+    const hadCodex = catRegistry.has('codex');
+
+    if (!hadCodex) {
+      catRegistry.register('codex', {
+        id: 'codex',
+        name: 'codex',
+        displayName: 'Codex',
+        avatar: '',
+        color: 'blue',
+        mentionPatterns: ['@codex'],
+        clientId: 'openai',
+        defaultModel: 'gpt-5.3-codex',
+        mcpSupport: true,
+        roleDescription: 'test',
+        personality: 'test',
+      });
+    }
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'remote-mcp',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp.example.com/v1',
+            command: '',
+            args: [],
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello streamable http', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-streamable',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-streamable',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-streamable' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          // streamableHttp entry should be injected with url, not command/args
+          assert.ok(
+            args.includes('mcp_servers.remote-mcp.url="https://mcp.example.com/v1"'),
+            'streamableHttp entry must inject url',
+          );
+          assert.ok(args.includes('mcp_servers.remote-mcp.enabled=true'), 'streamableHttp entry must be enabled');
+          // Must NOT have command/args (URL-based transport)
+          assert.ok(
+            !args.some((a) => a.includes('mcp_servers.remote-mcp.command=')),
+            'streamableHttp entry must not inject command',
+          );
+        });
+      });
+    } finally {
+      if (!hadCodex) {
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(savedConfigs)) {
+          catRegistry.register(id, config);
+        }
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config maps Authorization Bearer header to bearer_token_env_var', async () => {
+    // #1074: When a streamableHttp entry has an Authorization: Bearer header,
+    // CodexAgentService must extract the token into a process env var and
+    // inject bearer_token_env_var pointing at it — Codex CLI does not accept
+    // arbitrary headers, only bearer_token_env_var.
+    const runtimeRoot = makeTempDir('.tmp-codex-bearer-');
+    const projectDir = makeTempDir('.tmp-codex-bearer-project-');
+    const savedConfigs = catRegistry.getAllConfigs();
+    const hadCodex = catRegistry.has('codex');
+
+    if (!hadCodex) {
+      catRegistry.register('codex', {
+        id: 'codex',
+        name: 'codex',
+        displayName: 'Codex',
+        avatar: '',
+        color: 'blue',
+        mentionPatterns: ['@codex'],
+        clientId: 'openai',
+        defaultModel: 'gpt-5.3-codex',
+        mcpSupport: true,
+        roleDescription: 'test',
+        personality: 'test',
+      });
+    }
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'authed-remote',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp.secure.example.com/v1',
+            command: '',
+            args: [],
+            headers: { Authorization: 'Bearer sk-test-secret-token-123' },
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello authed streamable', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-bearer',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-bearer',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-bearer' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+          // URL must still be injected
+          assert.ok(
+            args.includes('mcp_servers.authed-remote.url="https://mcp.secure.example.com/v1"'),
+            'authed streamableHttp must inject url',
+          );
+          assert.ok(args.includes('mcp_servers.authed-remote.enabled=true'), 'authed streamableHttp must be enabled');
+          // bearer_token_env_var must reference the generated env var (includes hash suffix)
+          const bearerArg = args.find((a) => a.includes('bearer_token_env_var'));
+          assert.ok(bearerArg, 'must inject bearer_token_env_var config');
+          assert.ok(
+            bearerArg.includes('CLOWDER_MCP_BEARER_AUTHED_REMOTE_'),
+            'bearer_token_env_var must reference CLOWDER_MCP_BEARER_AUTHED_REMOTE_<hash>',
+          );
+          // Extract actual env var name from the config arg
+          const envVarMatch = bearerArg.match(/CLOWDER_MCP_BEARER_[A-Za-z0-9_]+/);
+          assert.ok(envVarMatch, 'bearer env var name must be extractable');
+          const actualEnvVar = envVarMatch[0];
+          // Token must be in process env (Codex reads bearer_token_env_var from process env)
+          assert.ok(spawnOpts?.env, 'spawn options must include env');
+          assert.strictEqual(
+            spawnOpts.env[actualEnvVar],
+            'sk-test-secret-token-123',
+            'bearer token must be in child process env',
+          );
+          // Must NOT have command/args
+          assert.ok(
+            !args.some((a) => a.includes('mcp_servers.authed-remote.command=')),
+            'authed streamableHttp must not inject command',
+          );
+        });
+      });
+    } finally {
+      if (!hadCodex) {
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(savedConfigs)) {
+          catRegistry.register(id, config);
+        }
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Bearer env var names are collision-proof for MCP ids that normalize identically', async () => {
+    // Regression: `foo-bar` and `foo_bar` both sanitize to `FOO_BAR`.
+    // Without a hash suffix the second overwrites the first in bearerEnv,
+    // routing one MCP's token to another — a secret misrouting bug.
+    const runtimeRoot = makeTempDir('.tmp-codex-bearer-collision-');
+    const projectDir = makeTempDir('.tmp-codex-bearer-collision-project-');
+    const savedConfigs = catRegistry.getAllConfigs();
+    const hadCodex = catRegistry.has('codex');
+
+    if (!hadCodex) {
+      catRegistry.register('codex', {
+        id: 'codex',
+        name: 'codex',
+        displayName: 'Codex',
+        avatar: '',
+        color: 'blue',
+        mentionPatterns: ['@codex'],
+        clientId: 'openai',
+        defaultModel: 'gpt-5.3-codex',
+        mcpSupport: true,
+        roleDescription: 'test',
+        personality: 'test',
+      });
+    }
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'foo-bar',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp-a.example.com',
+            command: '',
+            args: [],
+            headers: { Authorization: 'Bearer token-A' },
+          },
+        },
+        {
+          id: 'foo_bar',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp-b.example.com',
+            command: '',
+            args: [],
+            headers: { Authorization: 'Bearer token-B' },
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('test collision', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-collision',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-collision',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-collision' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+
+          // Both MCPs must have distinct bearer_token_env_var configs
+          const bearerArgs = args.filter((a) => a.includes('bearer_token_env_var'));
+          assert.strictEqual(bearerArgs.length, 2, 'must have two distinct bearer_token_env_var configs');
+
+          // Extract env var names from the config args
+          const envVarNames = bearerArgs.map((a) => {
+            const m = a.match(/CLOWDER_MCP_BEARER_[A-Za-z0-9_]+/);
+            return m ? m[0] : null;
+          });
+          assert.ok(envVarNames[0] && envVarNames[1], 'both env var names must be extractable');
+          assert.notStrictEqual(envVarNames[0], envVarNames[1], 'env var names must differ (collision-proof)');
+
+          // Each env var must carry the correct token
+          assert.ok(spawnOpts?.env, 'spawn options must include env');
+          const tokenA = spawnOpts.env[envVarNames[0]];
+          const tokenB = spawnOpts.env[envVarNames[1]];
+          // Determine which env var goes with which MCP by checking the args ordering
+          const fooBarDashIdx = args.findIndex((a) => a.includes('mcp_servers.foo-bar.bearer'));
+          const fooBarUnderIdx = args.findIndex((a) => a.includes('mcp_servers.foo_bar.bearer'));
+          if (fooBarDashIdx < fooBarUnderIdx) {
+            assert.strictEqual(tokenA, 'token-A', 'foo-bar must carry token-A');
+            assert.strictEqual(tokenB, 'token-B', 'foo_bar must carry token-B');
+          } else {
+            assert.strictEqual(tokenA, 'token-B', 'foo_bar must carry token-B');
+            assert.strictEqual(tokenB, 'token-A', 'foo-bar must carry token-A');
+          }
+        });
+      });
+    } finally {
+      if (!hadCodex) {
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(savedConfigs)) {
+          catRegistry.register(id, config);
+        }
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Bearer auth maps case-insensitive Authorization header', async () => {
+    // HTTP headers are case-insensitive per RFC 7230. A descriptor with
+    // `AUTHORIZATION` or `authorization` must still be mapped.
+    const runtimeRoot = makeTempDir('.tmp-codex-bearer-case-');
+    const projectDir = makeTempDir('.tmp-codex-bearer-case-project-');
+    const savedConfigs = catRegistry.getAllConfigs();
+    const hadCodex = catRegistry.has('codex');
+
+    if (!hadCodex) {
+      catRegistry.register('codex', {
+        id: 'codex',
+        name: 'codex',
+        displayName: 'Codex',
+        avatar: '',
+        color: 'blue',
+        mentionPatterns: ['@codex'],
+        clientId: 'openai',
+        defaultModel: 'gpt-5.3-codex',
+        mcpSupport: true,
+        roleDescription: 'test',
+        personality: 'test',
+      });
+    }
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      // Use AUTHORIZATION (all-caps) — must still be recognized
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'upper-auth',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp.upper.example.com',
+            command: '',
+            args: [],
+            headers: { AUTHORIZATION: 'Bearer sk-upper-token' },
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('test upper auth', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-upper',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-upper',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-upper' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+
+          const bearerArg = args.find((a) => a.includes('bearer_token_env_var'));
+          assert.ok(bearerArg, 'AUTHORIZATION (all-caps) must still map to bearer_token_env_var');
+
+          const envVarMatch = bearerArg.match(/CLOWDER_MCP_BEARER_[A-Za-z0-9_]+/);
+          assert.ok(envVarMatch, 'env var name must be extractable');
+          assert.strictEqual(
+            spawnOpts.env[envVarMatch[0]],
+            'sk-upper-token',
+            'bearer token must be in child process env',
+          );
+        });
+      });
+    } finally {
+      if (!hadCodex) {
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(savedConfigs)) {
+          catRegistry.register(id, config);
+        }
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Bearer auth resolves ${ENV_VAR} placeholders in Authorization header', async () => {
+    // Regression: mcp-probe.ts resolves ${ENV} in headers before connecting.
+    // Codex invoke must do the same — otherwise probe succeeds but Codex sends
+    // the literal placeholder string as the bearer token.
+    const runtimeRoot = makeTempDir('.tmp-codex-bearer-envref-');
+    const projectDir = makeTempDir('.tmp-codex-bearer-envref-project-');
+    const savedConfigs = catRegistry.getAllConfigs();
+    const hadCodex = catRegistry.has('codex');
+
+    if (!hadCodex) {
+      catRegistry.register('codex', {
+        id: 'codex',
+        name: 'codex',
+        displayName: 'Codex',
+        avatar: '',
+        color: 'blue',
+        mentionPatterns: ['@codex'],
+        clientId: 'openai',
+        defaultModel: 'gpt-5.3-codex',
+        mcpSupport: true,
+        roleDescription: 'test',
+        personality: 'test',
+      });
+    }
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    // Set a real env var for the placeholder to resolve against
+    const envKey = 'TEST_MCP_BEARER_PLACEHOLDER_TOKEN';
+    const originalEnv = process.env[envKey];
+    process.env[envKey] = 'resolved-secret-token-456';
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'env-backed-remote',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp.envbacked.example.com',
+            command: '',
+            args: [],
+            headers: { Authorization: `Bearer \${${envKey}}` },
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('test env-backed bearer', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-envref',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-envref',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-envref' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+
+          const bearerArg = args.find((a) => a.includes('bearer_token_env_var'));
+          assert.ok(bearerArg, 'env-backed header must still map to bearer_token_env_var');
+
+          const envVarMatch = bearerArg.match(/CLOWDER_MCP_BEARER_[A-Za-z0-9_]+/);
+          assert.ok(envVarMatch, 'env var name must be extractable');
+
+          // The child env var must contain the RESOLVED token, not the placeholder
+          assert.strictEqual(
+            spawnOpts.env[envVarMatch[0]],
+            'resolved-secret-token-456',
+            'bearer token must be the resolved value, not the ${} placeholder',
+          );
+        });
+      });
+    } finally {
+      // Restore original env
+      if (originalEnv === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = originalEnv;
+      }
+      if (!hadCodex) {
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(savedConfigs)) {
+          catRegistry.register(id, config);
+        }
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config emits URL-based disabled override for streamableHttp entries', async () => {
+    // When a streamableHttp entry from .codex/config.toml is disabled, we must
+    // emit url + enabled=false (not command/args stdio dummy). Overlaying stdio
+    // fields on a TOML table that already has `url` causes Codex CLI error
+    // "url is not supported for stdio" — transport conflict.
+    const runtimeRoot = makeTempDir('.tmp-codex-disabled-streamable-');
+    const projectDir = makeTempDir('.tmp-codex-disabled-streamable-project-');
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    try {
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      // Disabled streamableHttp entry — globalEnabled=false with a URL
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'disabled-remote',
+          type: 'mcp',
+          globalEnabled: false,
+          source: 'external',
+          mcpServer: {
+            transport: 'streamableHttp',
+            url: 'https://mcp.disabled.example.com/v1',
+            command: '',
+            args: [],
+          },
+        },
+      ]);
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello disabled streamable http', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-disabled-streamable',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-disabled-streamable',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-disabled-streamable' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          // Must use url + enabled=false (not stdio dummy)
+          assert.ok(
+            args.includes('mcp_servers.disabled-remote.url="https://mcp.disabled.example.com/v1"'),
+            'disabled streamableHttp must emit url (not command/args) to avoid transport conflict',
+          );
+          assert.ok(
+            args.includes('mcp_servers.disabled-remote.enabled=false'),
+            'disabled streamableHttp must emit enabled=false',
+          );
+          // Must NOT have command/args (would cause transport conflict)
+          assert.ok(
+            !args.some((a) => a.includes('mcp_servers.disabled-remote.command=')),
+            'disabled streamableHttp must not inject command (transport conflict)',
+          );
+          assert.ok(
+            !args.some((a) => a.includes('mcp_servers.disabled-remote.args=')),
+            'disabled streamableHttp must not inject args (transport conflict)',
+          );
+        });
+      });
+    } finally {
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config resolves pencil binary at invoke time', async () => {
+    // Pencil entries have resolver='pencil' with empty command/args.
+    // CodexAgentService must resolve the pencil binary at invoke time
+    // (same pattern as ClaudeAgentService) and inject via --config.
+    const runtimeRoot = makeTempDir('.tmp-codex-pencil-');
+    const projectDir = makeTempDir('.tmp-codex-pencil-project-');
+
+    // Create a mock pencil binary (must be executable for isExecutableCommandPath)
+    const pencilBin = join(projectDir, 'mock-pencil-mcp-server');
+    writeFileSync(pencilBin, '#!/bin/sh\necho "mock pencil"', 'utf8');
+    chmodSync(pencilBin, 0o755);
+
+    const previousPencilBin = process.env.PENCIL_MCP_BIN;
+    const previousPencilApp = process.env.PENCIL_MCP_APP;
+    try {
+      // Use PENCIL_MCP_BIN env override so resolvePencilCommand finds our mock
+      process.env.PENCIL_MCP_BIN = pencilBin;
+      process.env.PENCIL_MCP_APP = 'vscode';
+
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'pencil',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'cat-cafe',
+          mcpServer: {
+            resolver: 'pencil',
+            command: '',
+            args: [],
+          },
+        },
+      ]);
+
+      const proc = createMockProcess();
+      const spawnFn = createMockSpawnFn(proc);
+      const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello pencil', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-pencil',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-pencil',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-pencil' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          // Pencil entry must be resolved and injected with command + args + enabled
+          const pencilCommandArg = args.find((a) => a.includes('mcp_servers.pencil.command='));
+          assert.ok(pencilCommandArg, 'pencil entry must inject resolved command');
+          assert.ok(
+            pencilCommandArg.includes('mock-pencil-mcp-server'),
+            `pencil command must contain resolved binary path, got: ${pencilCommandArg}`,
+          );
+          const pencilArgsArg = args.find((a) => a.includes('mcp_servers.pencil.args='));
+          assert.ok(pencilArgsArg, 'pencil entry must inject args');
+          assert.ok(pencilArgsArg.includes('--app'), 'pencil args must include --app');
+          assert.ok(pencilArgsArg.includes('vscode'), 'pencil args must include app name');
+          // Must explicitly enable to override any stale config.toml disabled state
+          assert.ok(
+            args.includes('mcp_servers.pencil.enabled=true'),
+            'pencil entry must inject enabled=true to override stale config',
+          );
+        });
+      });
+    } finally {
+      if (previousPencilBin === undefined) {
+        delete process.env.PENCIL_MCP_BIN;
+      } else {
+        process.env.PENCIL_MCP_BIN = previousPencilBin;
+      }
+      if (previousPencilApp === undefined) {
+        delete process.env.PENCIL_MCP_APP;
+      } else {
+        process.env.PENCIL_MCP_APP = previousPencilApp;
+      }
+      rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex MCP config emits disabled dummy when pencil binary is not found', async () => {
+    // When resolvePencilCommand returns null (no pencil installation),
+    // CodexAgentService must emit a disabled dummy shape to prevent
+    // stale .codex/config.toml entries from reviving an old binary.
+    const runtimeRoot = makeTempDir('.tmp-codex-pencil-null-');
+    const projectDir = makeTempDir('.tmp-codex-pencil-null-project-');
+
+    const previousPencilBin = process.env.PENCIL_MCP_BIN;
+    try {
+      // Point PENCIL_MCP_BIN at a non-existent path so resolution returns null
+      process.env.PENCIL_MCP_BIN = '/nonexistent/path/pencil-mcp-server';
+
+      writeMcpDistStubs(runtimeRoot, [
+        'index.js',
+        'collab.js',
+        'memory.js',
+        'signals.js',
+        'limb.js',
+        'audio.js',
+        'finance.js',
+      ]);
+      writeCapabilitiesConfig(runtimeRoot, [
+        {
+          id: 'pencil',
+          type: 'mcp',
+          globalEnabled: true,
+          source: 'cat-cafe',
+          mcpServer: {
+            resolver: 'pencil',
+            command: '',
+            args: [],
+          },
+        },
+      ]);
+
+      const proc = createMockProcess();
+      const spawnFn = createMockSpawnFn(proc);
+      const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+      await withWorkspaceEnv({ ALLOWED_WORKSPACE_DIRS: undefined, CAT_CAFE_WORKSPACE_ROOT: undefined }, async () => {
+        await withRuntimeRootEnv(runtimeRoot, async () => {
+          const promise = collect(
+            service.invoke('hello pencil null', {
+              workingDirectory: projectDir,
+              callbackEnv: {
+                CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+                CAT_CAFE_INVOCATION_ID: 'inv-pencil-null',
+                CAT_CAFE_CALLBACK_TOKEN: 'tok-pencil-null',
+                CAT_CAFE_CAT_ID: 'codex',
+              },
+            }),
+          );
+          emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-pencil-null' }]);
+          await promise;
+
+          const args = spawnFn.mock.calls[0].arguments[1];
+          // Unresolved pencil must emit disabled dummy to suppress stale config.toml
+          assert.ok(args.includes('mcp_servers.pencil.command="echo"'), 'unresolved pencil must emit dummy command');
+          assert.ok(
+            args.some((a) => a.includes('mcp_servers.pencil.args=') && a.includes('disabled-shim')),
+            'unresolved pencil must emit disabled-shim args',
+          );
+          assert.ok(args.includes('mcp_servers.pencil.enabled=false'), 'unresolved pencil must be explicitly disabled');
+        });
+      });
+    } finally {
+      if (previousPencilBin === undefined) {
+        delete process.env.PENCIL_MCP_BIN;
+      } else {
+        process.env.PENCIL_MCP_BIN = previousPencilBin;
+      }
       rmSync(runtimeRoot, { recursive: true, force: true });
       rmSync(projectDir, { recursive: true, force: true });
     }

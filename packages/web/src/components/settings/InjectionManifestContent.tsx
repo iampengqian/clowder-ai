@@ -25,7 +25,8 @@ interface ManifestResponse {
   schemaVersion: string;
   segments: ManifestSegment[];
   totalActive: number;
-  totalLegacy: number;
+  totalObserveOnly: number;
+  totalExternal: number;
 }
 
 // ── Main component ──────────────────────────────────────────────
@@ -116,7 +117,7 @@ export function InjectionManifestContent({ onStageChange, slotAfterCarrier }: In
         description="猫的会话执行管线。点击阶段查看注入详情，高亮 = 注入点，浅色 = 影响范围。"
         badge={
           <SettingsBadge tone="slate">
-            {data.totalActive} 活跃 · {data.totalLegacy} 遗留
+            {data.totalActive} 活跃 · {data.totalObserveOnly} 观测 · {data.totalExternal} 外部
           </SettingsBadge>
         }
       />

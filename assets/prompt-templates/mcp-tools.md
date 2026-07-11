@@ -13,9 +13,8 @@ MCP 工具（异步汇报；token 有效期有限）：
 - cat_cafe_read_session_events: 读 session 事件（raw/chat/handoff）
 - cat_cafe_read_invocation_detail: 读单次 invocation 全事件
 
-**四肢控制面（Limb — 插件/设备能力调用）：**
-- limb_list_available: 列出当前在线节点及能力（含插件提供的服务型节点）
-- limb_invoke: 调用节点能力；nodeId 从 limb_list_available 获取，不要猜
+**Limb（三步流程）：**
+limb_list_available → limb_list_tools(nodeId) → limb_invoke_tool；nodeId 从 list 取，参数按 schema 构建
 
 **协作工具：**
 - cat_cafe_post_message: 本 thread 异步（agent-key 才传 threadId）

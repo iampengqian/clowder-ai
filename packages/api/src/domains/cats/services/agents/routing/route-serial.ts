@@ -10,6 +10,7 @@
  * A2A only triggers here in routeSerial; routeParallel never chains (MVP safety boundary).
  */
 
+import crypto from 'node:crypto';
 import {
   type CatConfig,
   type CatId,
@@ -74,6 +75,10 @@ import {
   prepareGuideContext,
 } from '../../../../guides/GuideRoutingInterceptor.js';
 import { triggerRecallCorrelation } from '../../../../memory/recall-correlation-hook.js';
+import { drainCapturedTraces } from '../../../../prompt-hooks/PipelinePromptBuilder.js';
+import { getTraceStore } from '../../../../prompt-hooks/trace-bootstrap.js';
+// F237: Injection trace (v0 — fire-and-forget observability)
+import { buildTraceDetail, buildTraceSummary, collectTrace } from '../../../../prompt-hooks/trace-collector.js';
 import { assembleContext } from '../../context/ContextAssembler.js';
 import {
   buildInvocationContext,
@@ -688,6 +693,9 @@ export async function* routeSerial(
       const staticIdentity = hasNativeL0
         ? buildStaticIdentityPackOnly(catId, { packBlocks })
         : buildStaticIdentity(catId, { mcpAvailable, packBlocks });
+      // F237: drain session trace synchronously — before any await between
+      // buildStaticIdentity and buildInvocationContext (race-safety for parallel reuse).
+      drainCapturedTraces();
       // L0-budget-defense PR-B-impl (ADR-038 件套 ④): staging is NOT prepended
       // to staticIdentity here. Cloud R2 P1 #2237 L1099: folding staging into
       // staticIdentity breaks ADR-038 "每轮注入生效" contract on resumed
@@ -792,6 +800,8 @@ export async function* routeSerial(
         ...(worldContext ? { worldContext } : {}),
         ...conciergeContextForCat(conciergeCtx, catId as string),
       });
+      // F237: drain turn trace synchronously — no yield between build and drain.
+      drainCapturedTraces();
       const continuityCapsule = buildCapsuleFromRouteState({
         threadId,
         catId: catId as string,
@@ -805,6 +815,11 @@ export async function* routeSerial(
         a2aDepth: worklistEntry.a2aCount,
         maxA2ADepth: maxDepth,
       });
+
+      // F237 Phase 2: Pipeline trace capture is drained above (lines 698, 804)
+      // to prevent stale module-global buffer. Persistence is handled by the v0
+      // trace path below (after all route-level content is assembled), avoiding
+      // duplicate records. Phase 2 will take over persistence when migration completes.
 
       // F24 Phase E: Bootstrap context for Session #2+
       // #836: Reborn cats skip bootstrap — every invocation starts with zero prior context.
@@ -848,6 +863,36 @@ export async function* routeSerial(
         } catch {
           // Best-effort: bootstrap failure doesn't block invocation
         }
+      }
+
+      // F237: fire-and-forget injection trace persist (v0 — observability only)
+      // Placed after bootstrapContext so per-turn trace covers ALL route-level
+      // injected system/control content (invocation + mode prompt + bootstrap + MCP).
+      try {
+        const traceStore = getTraceStore();
+        if (traceStore) {
+          const traceTurnId = crypto.randomUUID();
+          const traceModePrompt = modeSystemPromptByCat?.[catId as string] ?? modeSystemPrompt ?? '';
+          const traceTurnContent = [invocationContext, traceModePrompt, bootstrapContext, mcpInstructions]
+            .filter(Boolean)
+            .join('\n\n---\n\n');
+          const trace = collectTrace(catId as string, staticIdentity, traceTurnContent, hasNativeL0, {
+            mcpAvailable,
+            packBlocks,
+          });
+          const traceMeta = { turnId: traceTurnId, threadId, catId: catId as string };
+          const summary = buildTraceSummary(trace, traceMeta);
+          const detail = buildTraceDetail(trace, traceMeta);
+          traceStore.persist(summary, detail).catch((err) => {
+            log.warn({ err, threadId, catId }, '[F237] injection trace persist failed (fire-and-forget)');
+          });
+        }
+        // v0 collectTrace → buildStaticIdentity(annotateSegments: true) re-populates
+        // the module-global capturedSessionTrace without draining. Clear it so the next
+        // invocation (especially native-L0 pack-only) doesn't persist stale session traces.
+        if (deps.injectionTraceStore) drainCapturedTraces();
+      } catch {
+        /* F237: trace collection must never break invocation */
       }
 
       let deliveryBoundaryId: string | undefined;

@@ -107,9 +107,10 @@ const EXPECTED_TOOLS = [
   'cat_cafe_read_invocation_detail',
   'cat_cafe_list_external_runtime_sessions',
   'cat_cafe_read_external_runtime_session',
-  // Limb tools
+  // Limb tools (3-step flow: list_available → list_tools → invoke_tool)
   'limb_list_available',
-  'limb_invoke',
+  'limb_list_tools',
+  'limb_invoke_tool',
   'limb_pair_list',
   'limb_pair_approve',
   // F101 Phase I: Game action tool
@@ -125,6 +126,9 @@ const EXPECTED_TOOLS = [
   'cat_cafe_shell_exec',
   // F236 Phase C: cc native Read/Grep/Glob anchor mode control
   'cat_cafe_set_read_mode',
+  // #872: Thread Metadata MCP
+  'cat_cafe_get_thread_metadata',
+  'cat_cafe_set_thread_metadata',
   // F195 Phase B: Audio capture + transcription tools
   'cat_cafe_audio_list_sources',
   'cat_cafe_audio_capture_start',
@@ -204,6 +208,9 @@ const EXPECTED_COLLAB_TOOLS = [
   'cat_cafe_shell_exec',
   // F236 Phase C: cc native Read/Grep/Glob anchor mode control
   'cat_cafe_set_read_mode',
+  // #872: Thread Metadata MCP
+  'cat_cafe_get_thread_metadata',
+  'cat_cafe_set_thread_metadata',
   // F168 Phase B Task 6: declare awaiting_external state for a community case
   'cat_cafe_community_await_external',
 ];
@@ -249,7 +256,13 @@ const EXPECTED_SIGNAL_TOOLS = [
 ];
 
 // F193 Phase C: limb tools (布偶猫专属能力 namespace) get their own server.
-const EXPECTED_LIMB_TOOLS = ['limb_list_available', 'limb_invoke', 'limb_pair_list', 'limb_pair_approve'];
+const EXPECTED_LIMB_TOOLS = [
+  'limb_list_available',
+  'limb_list_tools',
+  'limb_invoke_tool',
+  'limb_pair_list',
+  'limb_pair_approve',
+];
 
 // F207 Phase B0: finance fact tools get their own read-only data-plane server.
 const EXPECTED_AUDIO_TOOLS = [
@@ -515,6 +528,8 @@ const KNOWN_WRITE_TOOLS = [
   'cat_cafe_feat_index', // requires callback credentials unavailable in readonly
   // F236 Phase C: set_read_mode writes mode file via callbackPost
   'cat_cafe_set_read_mode',
+  // #872: set_thread_metadata writes via callbackPost
+  'cat_cafe_set_thread_metadata',
   'signal_mark_read',
   'signal_summarize',
   'signal_start_study',
@@ -523,7 +538,7 @@ const KNOWN_WRITE_TOOLS = [
   'signal_update_article',
   'signal_delete_article',
   'signal_link_thread',
-  'limb_invoke',
+  'limb_invoke_tool',
   'limb_pair_approve',
 ];
 

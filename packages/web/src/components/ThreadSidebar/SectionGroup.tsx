@@ -1,6 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useIMEGuard } from '@/hooks/useIMEGuard';
 
+/** Detect OS for the "reveal in file manager" menu label. Returns a label + icon kind.
+ *  Client-only — this component's context menu only renders after a user click, so
+ *  navigator is always available here. */
+function getRevealLabel(): { label: string; kind: 'finder' | 'explorer' | 'files' } {
+  if (typeof navigator === 'undefined') return { label: '在文件管理器中打开', kind: 'files' };
+  const ua = navigator.userAgent || '';
+  if (ua.includes('Win')) return { label: '在资源管理器中打开', kind: 'explorer' };
+  if (ua.includes('Mac')) return { label: '在 Finder 中打开', kind: 'finder' };
+  return { label: '在文件管理器中打开', kind: 'files' };
+}
+
 /** F070: governance status dot colors */
 const GOV_STATUS_DOT: Record<string, { color: string; title: string }> = {
   healthy: { color: 'bg-conn-emerald-text', title: '治理正常' },
@@ -9,9 +20,8 @@ const GOV_STATUS_DOT: Record<string, { color: string; title: string }> = {
   'never-synced': { color: 'bg-conn-slate-ring', title: '未同步治理' },
 };
 
-/** Section icon SVG paths (extracted to reduce JSX noise) */
+/** Section icon SVG paths (extracted to reduce JSX noise). pin uses stroke style — see PinSectionIcon. */
 const ICON_PATHS: Record<string, string> = {
-  pin: 'M4.456 2.013a.75.75 0 011.06-.034l6.5 6a.75.75 0 01-.034 1.06l-1.99 1.838.637 3.22a.75.75 0 01-1.196.693L6.5 12.526l-2.933 2.264a.75.75 0 01-1.196-.693l.637-3.22-1.99-1.838a.75.75 0 01-.034-1.06l5.472-5.966z',
   star: 'M8 1.5l2.09 4.26 4.71.68-3.41 3.32.8 4.69L8 12.26l-4.19 2.19.8-4.69L1.2 6.44l4.71-.68L8 1.5z',
   clock:
     'M8 1a7 7 0 110 14A7 7 0 018 1zm0 1.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM8 4a.75.75 0 01.75.75v2.69l1.78 1.78a.75.75 0 01-1.06 1.06l-2-2A.75.75 0 017.25 8V4.75A.75.75 0 018 4z',
@@ -71,7 +81,7 @@ export function SectionGroup({
   const inputRef = useRef<HTMLInputElement>(null);
   const ime = useIMEGuard();
 
-  const hasContextMenu = onOpenInFinder || onRenameProject || onArchiveThreads;
+  const hasContextMenu = onOpenInFinder || onRenameProject || onArchiveThreads || onToggleProjectPin;
 
   // Close menu on click outside
   useEffect(() => {
@@ -114,60 +124,46 @@ export function SectionGroup({
   const govDot = governanceStatus ? GOV_STATUS_DOT[governanceStatus] : undefined;
 
   return (
-    <div className="mt-1 relative group/section">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full text-left px-3 py-1.5 flex items-center gap-1.5 hover:bg-cafe-surface-elevated transition-colors"
-        title={projectPath && projectPath !== 'default' ? projectPath : undefined}
-      >
-        {/* Chevron */}
-        <svg
-          aria-hidden="true"
-          className={`w-3 h-3 text-cafe-muted transition-transform flex-shrink-0 ${isCollapsed ? '' : 'rotate-90'}`}
-          viewBox="0 0 12 12"
-          fill="currentColor"
-        >
-          <path d="M4 2l4 4-4 4V2z" />
-        </svg>
-
-        {/* Section icon */}
-        {iconPath && (
-          <svg
-            aria-hidden="true"
-            className={`w-3 h-3 flex-shrink-0 ${iconColor}`}
-            viewBox="0 0 16 16"
-            fill="currentColor"
-          >
-            <path d={iconPath} />
-          </svg>
-        )}
-
-        {/* Label (inline rename or static) */}
+    <div className="relative mt-1 px-2 group/section">
+      <div className="flex w-full items-center gap-1 rounded-lg px-1.5 py-1.5 transition-colors hover:bg-cafe-surface-elevated">
         {isRenaming ? (
-          <input
-            ref={inputRef}
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            onClick={stopButton}
-            onCompositionStart={ime.onCompositionStart}
-            onCompositionEnd={ime.onCompositionEnd}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !ime.isComposing()) {
-                e.preventDefault();
-                submitRename();
-              }
-              if (e.key === 'Escape') {
-                e.preventDefault();
-                setIsRenaming(false);
-              }
-            }}
-            onBlur={submitRename}
-            maxLength={100}
-            className="text-xs font-medium px-1 py-0 rounded border border-cafe-subtle focus:outline-none focus:border-cafe-accent flex-1 min-w-0"
-          />
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <SectionChevron isCollapsed={isCollapsed} />
+            {iconPath && <SectionIcon iconPath={iconPath} iconColor={iconColor} />}
+            <input
+              ref={inputRef}
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onClick={stopButton}
+              onCompositionStart={ime.onCompositionStart}
+              onCompositionEnd={ime.onCompositionEnd}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !ime.isComposing()) {
+                  e.preventDefault();
+                  submitRename();
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setIsRenaming(false);
+                }
+              }}
+              onBlur={submitRename}
+              maxLength={100}
+              className="min-w-0 flex-1 rounded border border-cafe-subtle px-1 py-0 text-xs font-medium focus:border-cafe-accent focus:outline-none"
+            />
+          </div>
         ) : (
-          <span className="text-xs font-medium text-cafe-secondary truncate">{label}</span>
+          <button
+            type="button"
+            onClick={onToggle}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            title={projectPath && projectPath !== 'default' ? projectPath : undefined}
+          >
+            <SectionChevron isCollapsed={isCollapsed} />
+            {iconPath && <SectionIcon iconPath={iconPath} iconColor={iconColor} />}
+            {isProjectPinned && <PinSectionIcon />}
+            <span className="min-w-0 flex-1 truncate text-xs font-medium text-cafe-secondary">{label}</span>
+          </button>
         )}
 
         {/* Governance dot */}
@@ -185,7 +181,6 @@ export function SectionGroup({
             }}
             title="新建对话"
             testId="quick-create-btn"
-            className="opacity-0 group-hover/section:opacity-100"
           >
             <path d="M8 2a.75.75 0 01.75.75v4.5h4.5a.75.75 0 010 1.5h-4.5v4.5a.75.75 0 01-1.5 0v-4.5h-4.5a.75.75 0 010-1.5h4.5v-4.5A.75.75 0 018 2z" />
           </ActionButton>
@@ -200,51 +195,52 @@ export function SectionGroup({
             }}
             title="更多操作"
             testId="project-menu-btn"
-            className="opacity-0 group-hover/section:opacity-100"
           >
             <path d="M8 4a1 1 0 110-2 1 1 0 010 2zm0 5a1 1 0 110-2 1 1 0 010 2zm0 5a1 1 0 110-2 1 1 0 010 2z" />
           </ActionButton>
         )}
-
-        {/* Project pin button */}
-        {onToggleProjectPin && (
-          <ActionButton
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleProjectPin();
-            }}
-            title={isProjectPinned ? '取消固定项目' : '固定项目到活跃区'}
-            testId="project-pin-btn"
-            className={isProjectPinned ? 'text-cafe-accent' : 'text-cafe-muted hover:text-cafe-muted'}
-          >
-            <path d={ICON_PATHS.pin} />
-          </ActionButton>
-        )}
-      </button>
+      </div>
 
       {/* F095 Phase F: Context menu dropdown */}
       {showMenu && (
         <div
           ref={menuRef}
-          className="absolute right-2 top-8 z-50 bg-cafe-surface rounded-lg shadow-lg border border-cafe py-1 min-w-[140px]"
+          className="absolute right-2 top-8 z-50 bg-cafe-surface rounded-lg shadow-lg border border-cafe py-1 min-w-[160px]"
         >
+          {onToggleProjectPin && (
+            <MenuItem
+              onClick={() => {
+                onToggleProjectPin();
+                setShowMenu(false);
+              }}
+              icon={<PinMenuIcon active={isProjectPinned} />}
+            >
+              {isProjectPinned ? '取消固定项目' : '固定项目到活跃区'}
+            </MenuItem>
+          )}
           {onOpenInFinder && (
             <MenuItem
               onClick={() => {
                 onOpenInFinder();
                 setShowMenu(false);
               }}
+              icon={<FolderMenuIcon />}
             >
-              在 Finder 中打开
+              {getRevealLabel().label}
             </MenuItem>
           )}
-          {onRenameProject && <MenuItem onClick={startRename}>编辑名称</MenuItem>}
+          {onRenameProject && (
+            <MenuItem onClick={startRename} icon={<RenameMenuIcon />}>
+              编辑名称
+            </MenuItem>
+          )}
           {onArchiveThreads && (
             <MenuItem
               onClick={() => {
                 onArchiveThreads();
                 setShowMenu(false);
               }}
+              icon={<ArchiveMenuIcon />}
               danger
             >
               归档所有对话
@@ -255,6 +251,122 @@ export function SectionGroup({
 
       {!isCollapsed && children}
     </div>
+  );
+}
+
+function SectionChevron({ isCollapsed }: { isCollapsed: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`h-3 w-3 flex-shrink-0 text-cafe-muted transition-transform ${isCollapsed ? '' : 'rotate-90'}`}
+      viewBox="0 0 12 12"
+      fill="currentColor"
+    >
+      <path d="M4 2l4 4-4 4V2z" />
+    </svg>
+  );
+}
+
+function SectionIcon({ iconPath, iconColor }: { iconPath: string; iconColor?: string }) {
+  return (
+    <svg aria-hidden="true" className={`h-3 w-3 flex-shrink-0 ${iconColor}`} viewBox="0 0 16 16" fill="currentColor">
+      <path d={iconPath} />
+    </svg>
+  );
+}
+
+/** Pinned-section icon — demo pushpin (sidebar-proposals.html line 205), stroke style, 24x24. */
+function PinSectionIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3 w-3 flex-shrink-0 text-cafe-accent"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </svg>
+  );
+}
+
+/** Menu-item pushpin — accent when pinned, muted otherwise. */
+function PinMenuIcon({ active }: { active?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`h-3 w-3 flex-shrink-0 ${active ? 'text-cafe-accent' : 'text-cafe-muted'}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </svg>
+  );
+}
+
+/** Folder icon for the "reveal in file manager" menu item. */
+function FolderMenuIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3 w-3 flex-shrink-0 text-cafe-muted"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 20a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2z" />
+    </svg>
+  );
+}
+
+/** Pencil icon for the "rename" menu item. */
+function RenameMenuIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3 w-3 flex-shrink-0 text-cafe-muted"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  );
+}
+
+/** Archive box icon for the "archive threads" menu item. */
+function ArchiveMenuIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3 w-3 flex-shrink-0 text-cafe-muted"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M21 8v13H3V8" />
+      <path d="M1 3h22v5H1z" />
+      <path d="M10 12h4" />
+    </svg>
   );
 }
 
@@ -273,9 +385,8 @@ function ActionButton({
   children: React.ReactNode;
 }) {
   return (
-    <span
-      role="button"
-      tabIndex={0}
+    <button
+      type="button"
       onClick={onClick}
       onKeyDown={(e) => {
         if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
@@ -284,27 +395,38 @@ function ActionButton({
           onClick(e as unknown as React.MouseEvent);
         }
       }}
-      className={`ml-0.5 flex-shrink-0 cursor-pointer transition-all text-cafe-muted hover:text-cafe-secondary ${className ?? ''}`}
+      className={`ml-0.5 flex-shrink-0 transition-all text-cafe-muted hover:text-cafe-secondary ${className ?? ''}`}
       title={title}
       data-testid={testId}
     >
       <svg aria-hidden="true" className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
         {children}
       </svg>
-    </span>
+    </button>
   );
 }
 
 /** Menu item for the project context menu dropdown. */
-function MenuItem({ onClick, danger, children }: { onClick: () => void; danger?: boolean; children: React.ReactNode }) {
+function MenuItem({
+  onClick,
+  danger,
+  icon,
+  children,
+}: {
+  onClick: () => void;
+  danger?: boolean;
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+      className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs transition-colors ${
         danger ? 'text-conn-red-text hover:bg-conn-red-bg' : 'text-cafe-secondary hover:bg-cafe-surface-elevated'
       }`}
     >
+      {icon && <span className="flex flex-shrink-0 items-center">{icon}</span>}
       {children}
     </button>
   );
